@@ -32,6 +32,31 @@ class ProvisionTarget:
     method: str | None = None
 
 
+@dataclass(slots=True)
+class ProvisionInbound:
+    """Inbound сервера, к которому нужно привязать клиента."""
+
+    inbound_id: int
+    protocol: Protocol
+    flow: str | None = None
+    method: str | None = None
+
+
+@dataclass(slots=True)
+class ServerProvision:
+    """Один клиент панели (глобальный по email), привязанный к её inbound'ам.
+
+    Соответствует модели 3x-ui >= 3.2.x: email/subId уникальны в пределах панели,
+    клиент привязывается сразу к нескольким inbound'ам разных протоколов.
+    """
+
+    email: str
+    sub_id: str
+    client_uuid: str
+    password: str
+    inbounds: list[ProvisionInbound]
+
+
 class PanelUpdater(TypingProtocol):
     """Интерфейс работы с клиентом в панели.
 
@@ -43,10 +68,10 @@ class PanelUpdater(TypingProtocol):
     ) -> None:
         ...
 
-    async def ensure_client(
-        self, server: Server, target: ProvisionTarget, expiry_ms: int
+    async def provision_server(
+        self, server: Server, spec: ServerProvision, expiry_ms: int
     ) -> None:
-        """Создаёт клиента, если его нет, иначе обновляет срок действия."""
+        """Создаёт/обновляет клиента сразу для всех inbound'ов сервера."""
         ...
 
 
@@ -56,7 +81,7 @@ class MockPanelUpdater:
     def __init__(self, fail_server_ids: set[int] | None = None) -> None:
         self.fail_server_ids = fail_server_ids or set()
         self.calls: list[tuple[int, int]] = []
-        self.ensured: list[tuple[int, int, str]] = []
+        self.provisioned: list[tuple[int, str, tuple[int, ...]]] = []
 
     async def update_expiry(
         self, server: Server, mapping: ClientServerMapping, expiry_ms: int
@@ -65,9 +90,11 @@ class MockPanelUpdater:
         if server.id in self.fail_server_ids:
             raise PanelUpdateError(f"mock failure for server {server.id}")
 
-    async def ensure_client(
-        self, server: Server, target: ProvisionTarget, expiry_ms: int
+    async def provision_server(
+        self, server: Server, spec: ServerProvision, expiry_ms: int
     ) -> None:
-        self.ensured.append((server.id, target.inbound_id, target.email))
+        self.provisioned.append(
+            (server.id, spec.email, tuple(i.inbound_id for i in spec.inbounds))
+        )
         if server.id in self.fail_server_ids:
             raise PanelUpdateError(f"mock failure for server {server.id}")

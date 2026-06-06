@@ -31,6 +31,11 @@ class Settings(BaseSettings):
 
     xui_request_timeout: int = 15
 
+    # Уровень логирования приложения: DEBUG/INFO/WARNING/ERROR
+    log_level: str = "INFO"
+    # Подробный лог HTTP-запросов к 3x-ui (метод/путь/статус). DEBUG-уровень.
+    xui_debug: bool = False
+
     # Антишеринг-мониторинг (мягкий, без автоблокировки в MVP)
     anti_sharing_enabled: bool = True
     device_policy: str = "soft"

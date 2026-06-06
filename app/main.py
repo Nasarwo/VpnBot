@@ -6,19 +6,17 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import ErrorEvent
 from aiogram.utils.token import TokenValidationError, validate_token
 
 from app.bot.middlewares import DbSessionMiddleware
 from app.bot.router import build_root_router
 from app.config import Settings, get_settings
 from app.db.session import get_sessionmaker
+from app.logging_config import setup_logging
 from app.services import antishare
 from app.services.ip_provider import build_ip_provider
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -62,11 +60,26 @@ def build_dispatcher() -> Dispatcher:
     dp.message.outer_middleware(DbSessionMiddleware())
     dp.callback_query.outer_middleware(DbSessionMiddleware())
     dp.include_router(build_root_router())
+
+    @dp.errors()
+    async def _on_error(event: ErrorEvent) -> bool:
+        logger.exception(
+            "Необработанная ошибка при обработке апдейта: %s", event.exception
+        )
+        return True
+
     return dp
 
 
 async def run() -> None:
     settings = get_settings()
+    setup_logging(level=settings.log_level, xui_debug=settings.xui_debug)
+    logger.info(
+        "Запуск: log_level=%s, xui_debug=%s, db=%s",
+        settings.log_level,
+        settings.xui_debug,
+        settings.database_url.split("://", 1)[0],
+    )
     if not settings.bot_token:
         raise SystemExit(
             "BOT_TOKEN не задан. Укажите токен бота от @BotFather в .env "

@@ -59,6 +59,42 @@ def build_client_object(
     raise UnsupportedProtocolError(f"Протокол {protocol} не поддерживается")
 
 
+def build_client_record(
+    *,
+    client_uuid: str,
+    password: str,
+    email: str,
+    sub_id: str,
+    expiry_ms: int,
+    flow: str | None = None,
+    limit_ip: int = 0,
+    total_gb: int = 0,
+) -> dict[str, object]:
+    """Унифицированный объект клиента для нового client-API (3x-ui >= 3.2.x).
+
+    Один клиент привязывается сразу к нескольким inbound'ам разных протоколов.
+    Панель сама подставляет нужные поля по протоколу каждого inbound (id для
+    vless/vmess, password для trojan, ключ для shadowsocks, auth для hysteria2)
+    и убирает flow там, где он неприменим. Поэтому здесь задаём «суперсет» полей.
+    """
+    obj: dict[str, object] = {
+        "id": client_uuid,
+        "password": password,
+        "auth": password,
+        "email": email,
+        "subId": sub_id,
+        "enable": True,
+        "expiryTime": expiry_ms,
+        "limitIp": limit_ip,
+        "totalGB": total_gb,
+        "tgId": 0,
+        "reset": 0,
+    }
+    if flow:
+        obj["flow"] = flow
+    return obj
+
+
 def client_identifier(protocol: Protocol, *, client_uuid: str, email: str) -> str:
     """Идентификатор клиента в пути updateClient/{id}.
 

@@ -69,13 +69,16 @@ async def test_apply_access_creates_clients_and_mappings(
     await session.commit()
 
     assert all(r.ok for r in results)
-    assert len(updater.ensured) == 2
+    # Один глобальный клиент на сервер, привязанный к обоим inbound'ам.
+    assert len(updater.provisioned) == 1
+    server_id, email, inbound_ids = updater.provisioned[0]
+    assert email == "PUB123"
+    assert set(inbound_ids) == {10, 11}
 
     mappings = await MappingRepository(session).list_for_client(client.id)
-    assert len(mappings) == 2
-    emails = {m.email for m in mappings}
-    assert emails == {"PUB123-10", "PUB123-11"}
-    assert all(m.sub_id == "PUB123" for m in mappings)
+    assert len(mappings) == 1
+    assert mappings[0].email == "PUB123"
+    assert mappings[0].sub_id == "PUB123"
 
 
 async def test_apply_access_idempotent(session: AsyncSession, user: User):
@@ -95,7 +98,7 @@ async def test_apply_access_idempotent(session: AsyncSession, user: User):
     await session.commit()
 
     mappings = await MappingRepository(session).list_for_client(client.id)
-    assert len(mappings) == 2
+    assert len(mappings) == 1
 
 
 async def test_apply_access_partial_failure(session: AsyncSession, user: User):

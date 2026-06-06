@@ -152,6 +152,41 @@ class ServerRepository:
         )
         return list(result.scalars().all())
 
+    async def list_inbounds(self, server_id: int) -> list[ServerInbound]:
+        result = await self.session.execute(
+            select(ServerInbound)
+            .where(ServerInbound.server_id == server_id)
+            .order_by(ServerInbound.inbound_id.asc())
+        )
+        return list(result.scalars().all())
+
+    async def get_inbound(
+        self, server_id: int, inbound_id: int
+    ) -> ServerInbound | None:
+        result = await self.session.execute(
+            select(ServerInbound)
+            .where(ServerInbound.server_id == server_id)
+            .where(ServerInbound.inbound_id == inbound_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def delete_inbound(self, server_id: int, inbound_id: int) -> int:
+        """Удаляет настроенный inbound. Возвращает число удалённых записей."""
+        rows = await self.list_inbounds(server_id)
+        deleted = 0
+        for row in rows:
+            if row.inbound_id == inbound_id:
+                await self.session.delete(row)
+                deleted += 1
+        return deleted
+
+    async def clear_inbounds(self, server_id: int) -> int:
+        """Удаляет все настроенные inbound'ы сервера. Возвращает их число."""
+        rows = await self.list_inbounds(server_id)
+        for row in rows:
+            await self.session.delete(row)
+        return len(rows)
+
     async def has_provision_targets(self) -> bool:
         result = await self.session.execute(
             select(ServerInbound.id)
