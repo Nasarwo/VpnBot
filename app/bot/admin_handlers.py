@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from aiogram import Router
@@ -25,6 +26,8 @@ from app.services.panel_updater import PanelUpdateError, PanelUpdater
 from app.services.xui_client import XuiClient, XuiError
 from app.services.xui_updater import build_updater
 
+logger = logging.getLogger(__name__)
+
 router = Router(name="admin")
 router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
@@ -44,6 +47,12 @@ async def on_payment_action(
 ) -> None:
     action = callback_data.action
     payment_id = callback_data.payment_id
+    logger.info(
+        "Админ tg=%s действие=%s по заявке id=%s",
+        db_user.telegram_id,
+        action,
+        payment_id,
+    )
     pay_repo = PaymentRepository(session)
 
     if action == "history":
@@ -359,6 +368,79 @@ async def add_inbound(
     await message.answer(
         f"Inbound добавлен на сервер #{server_id}: id={inbound_id} "
         f"{protocol.value}"
+    )
+
+
+@router.message(Command("delinbound"))
+async def del_inbound(
+    message: Message, command: CommandObject, session: AsyncSession
+) -> None:
+    args = (command.args or "").split()
+    if len(args) < 2:
+        await message.answer(
+            "Формат: /delinbound <server_id> <inbound_id>\n"
+            "inbound_id — это id панели (см. /servers). "
+            "Удаляет inbound только из настроек бота, на панели он остаётся.\n"
+            "Удалить все сразу: /clearinbounds <server_id>"
+        )
+        return
+    try:
+        server_id = int(args[0])
+        inbound_id = int(args[1])
+    except ValueError:
+        await message.answer("server_id и inbound_id должны быть числами")
+        return
+    repo = ServerRepository(session)
+    if await repo.get_by_id(server_id) is None:
+        await message.answer("Сервер не найден")
+        return
+    deleted = await repo.delete_inbound(server_id, inbound_id)
+    if not deleted:
+        await message.answer(
+            f"На сервере #{server_id} нет настроенного inbound {inbound_id}."
+        )
+        return
+    await session.commit()
+    logger.info(
+        "Админ tg=%s удалил inbound %s сервера #%s (записей: %s)",
+        message.from_user.id if message.from_user else "?",
+        inbound_id,
+        server_id,
+        deleted,
+    )
+    await message.answer(
+        f"Inbound {inbound_id} удалён из настроек сервера #{server_id}. "
+        "Новым клиентам он больше не выдаётся."
+    )
+
+
+@router.message(Command("clearinbounds"))
+async def clear_inbounds(
+    message: Message, command: CommandObject, session: AsyncSession
+) -> None:
+    args = (command.args or "").split()
+    if not args:
+        await message.answer("Использование: /clearinbounds <server_id>")
+        return
+    try:
+        server_id = int(args[0])
+    except ValueError:
+        await message.answer("server_id должен быть числом")
+        return
+    repo = ServerRepository(session)
+    if await repo.get_by_id(server_id) is None:
+        await message.answer("Сервер не найден")
+        return
+    deleted = await repo.clear_inbounds(server_id)
+    await session.commit()
+    logger.info(
+        "Админ tg=%s очистил inbound'ы сервера #%s (записей: %s)",
+        message.from_user.id if message.from_user else "?",
+        server_id,
+        deleted,
+    )
+    await message.answer(
+        f"Удалено настроенных inbound'ов: {deleted} (сервер #{server_id})."
     )
 
 

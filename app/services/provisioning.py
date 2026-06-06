@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid as uuid_lib
 from datetime import datetime
 
@@ -18,12 +19,15 @@ from app.services import audit
 from app.services.panel_updater import (
     PanelUpdateError,
     PanelUpdater,
-    ProvisionTarget,
+    ProvisionInbound,
+    ServerProvision,
     ServerUpdateResult,
 )
 from app.services.xui_client import XuiClient, XuiError
 
 # Сопоставление протокола из панели/xray с нашим Enum.
+logger = logging.getLogger(__name__)
+
 _PROTOCOL_MAP: dict[str, Protocol] = {
     "vless": Protocol.VLESS,
     "vmess": Protocol.VMESS,
@@ -42,9 +46,13 @@ def _new_secret() -> str:
     return str(uuid_lib.uuid4())
 
 
-def client_email(public_id: str, inbound_id: int) -> str:
-    """Email клиента в панели. Уникален в пределах панели (public_id + inbound)."""
-    return f"{public_id}-{inbound_id}"
+def client_email(public_id: str) -> str:
+    """Email клиента в панели. Глобален в пределах панели (= public_id).
+
+    В 3x-ui >= 3.2.x клиент один на панель и привязывается ко всем inbound'ам,
+    поэтому email и subId совпадают с public_id (по subId работает подписка).
+    """
+    return public_id
 
 
 async def has_targets(session: AsyncSession) -> bool:
@@ -59,8 +67,16 @@ async def ensure_vpn_client(session: AsyncSession, user: User) -> VpnClient:
         if not client.external_client_id:
             client.external_client_id = _new_secret()
             await session.flush()
+            logger.info(
+                "ensure_vpn_client: проставлен secret клиенту id=%s", client.id
+            )
         return client
 
+    logger.info(
+        "ensure_vpn_client: создаю VPN-клиента для user_id=%s public_id=%s",
+        user.id,
+        user.public_id,
+    )
     client = VpnClient(
         user_id=user.id,
         display_name=user.username or user.first_name,
@@ -73,21 +89,23 @@ async def ensure_vpn_client(session: AsyncSession, user: User) -> VpnClient:
     return client
 
 
-def _build_target(
-    public_id: str,
-    secret: str,
-    server: Server,  # noqa: ARG001 - оставлено для расширяемости
-    inbound: ServerInbound,
-) -> ProvisionTarget:
-    return ProvisionTarget(
-        inbound_id=inbound.inbound_id,
-        protocol=inbound.protocol,
+def _build_spec(
+    public_id: str, secret: str, inbounds: list[ServerInbound]
+) -> ServerProvision:
+    return ServerProvision(
+        email=client_email(public_id),
+        sub_id=public_id,
         client_uuid=secret,
         password=secret,
-        email=client_email(public_id, inbound.inbound_id),
-        sub_id=public_id,
-        flow=inbound.flow,
-        method=inbound.method,
+        inbounds=[
+            ProvisionInbound(
+                inbound_id=i.inbound_id,
+                protocol=i.protocol,
+                flow=i.flow,
+                method=i.method,
+            )
+            for i in inbounds
+        ],
     )
 
 
@@ -98,70 +116,90 @@ async def apply_access(
     expiry: datetime,
     updater: PanelUpdater,
 ) -> list[ServerUpdateResult]:
-    """Создаёт/обновляет клиента на всех включённых серверах и inbound'ах.
+    """Создаёт/обновляет клиента на всех включённых серверах.
 
-    Идемпотентно: если клиент уже есть в inbound — обновляется срок действия,
-    иначе клиент создаётся. Возвращает результат по каждому серверу/inbound.
+    На каждый сервер заводится один глобальный клиент (email=subId=public_id),
+    привязанный ко всем включённым inbound'ам этого сервера. Идемпотентно:
+    повторный вызов продлевает срок. Возвращает результат по каждому серверу.
     """
     expiry_ms = _expiry_to_ms(expiry)
     secret = vpn_client.external_client_id or _new_secret()
     vpn_client.external_client_id = secret
+    email = client_email(public_id)
 
     server_repo = ServerRepository(session)
     mapping_repo = MappingRepository(session)
 
     servers = await server_repo.list_enabled_with_inbounds()
-    existing = {
-        (m.server_id, m.inbound_id): m
-        for m in await mapping_repo.list_for_client(vpn_client.id)
+    existing_servers = {
+        m.server_id for m in await mapping_repo.list_for_client(vpn_client.id)
     }
+    logger.info(
+        "apply_access: client_id=%s public_id=%s expiry=%s серверов=%s "
+        "уже_привязано_серверов=%s",
+        vpn_client.id,
+        public_id,
+        expiry.isoformat(),
+        len(servers),
+        len(existing_servers),
+    )
 
     results: list[ServerUpdateResult] = []
-    covered: set[tuple[int, int]] = set()
+    covered_any = False
 
     for server in servers:
-        for inbound in server.inbounds:
-            if not inbound.enabled:
-                continue
-            key = (server.id, inbound.inbound_id)
-            covered.add(key)
-            target = _build_target(public_id, secret, server, inbound)
-            try:
-                await updater.ensure_client(server, target, expiry_ms)
-            except PanelUpdateError as exc:
-                results.append(
-                    ServerUpdateResult(
-                        server_id=server.id, ok=False, error=str(exc)
-                    )
-                )
-                continue
-            if key not in existing:
-                await mapping_repo.create(
-                    vpn_client_id=vpn_client.id,
-                    server_id=server.id,
-                    inbound_id=inbound.inbound_id,
-                    protocol=inbound.protocol,
-                    client_uuid=secret,
-                    email=target.email,
-                    sub_id=public_id,
-                )
-            results.append(ServerUpdateResult(server_id=server.id, ok=True))
-
-    # Унаследованные маппинги без конфигурации inbound — просто продлеваем срок.
-    for (server_id, inbound_id), mapping in existing.items():
-        if (server_id, inbound_id) in covered:
-            continue
-        server = mapping.server
-        if server is None or not server.enabled or not mapping.enabled:
-            continue
-        try:
-            await updater.update_expiry(server, mapping, expiry_ms)
-            results.append(ServerUpdateResult(server_id=server_id, ok=True))
-        except PanelUpdateError as exc:
-            results.append(
-                ServerUpdateResult(server_id=server_id, ok=False, error=str(exc))
+        enabled_inbounds = [i for i in server.inbounds if i.enabled]
+        if not enabled_inbounds:
+            logger.warning(
+                "apply_access: у сервера #%s (%s) нет включённых inbound'ов "
+                "— пропускаю (сделайте /importinbounds %s)",
+                server.id,
+                server.name,
+                server.id,
             )
+            continue
+        covered_any = True
+        spec = _build_spec(public_id, secret, enabled_inbounds)
+        try:
+            await updater.provision_server(server, spec, expiry_ms)
+        except PanelUpdateError as exc:
+            logger.warning(
+                "apply_access: ошибка на server=%s email=%s: %s",
+                server.id,
+                email,
+                exc,
+            )
+            results.append(
+                ServerUpdateResult(server_id=server.id, ok=False, error=str(exc))
+            )
+            continue
+        if server.id not in existing_servers:
+            primary = enabled_inbounds[0]
+            await mapping_repo.create(
+                vpn_client_id=vpn_client.id,
+                server_id=server.id,
+                inbound_id=primary.inbound_id,
+                protocol=primary.protocol,
+                client_uuid=secret,
+                email=email,
+                sub_id=public_id,
+            )
+        results.append(ServerUpdateResult(server_id=server.id, ok=True))
 
+    if not covered_any and not existing_servers:
+        logger.warning(
+            "apply_access: нет ни одного целевого inbound и ни одной привязки "
+            "— клиент не будет создан. Проверьте /servers и /importinbounds."
+        )
+
+    ok_count = sum(1 for r in results if r.ok)
+    fail_count = len(results) - ok_count
+    logger.info(
+        "apply_access завершён: client_id=%s успешно=%s ошибок=%s",
+        vpn_client.id,
+        ok_count,
+        fail_count,
+    )
     return results
 
 

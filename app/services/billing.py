@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -14,6 +15,8 @@ from app.db.repositories import (
 )
 from app.services import audit, provisioning
 from app.services.panel_updater import PanelUpdateError, PanelUpdater, ServerUpdateResult
+
+logger = logging.getLogger(__name__)
 
 
 class BillingError(Exception):
@@ -105,6 +108,14 @@ async def _extend_and_finalize(
     client_repo = VpnClientRepository(session)
     client = await client_repo.get_for_user(payment.user_id)
     targets = await provisioning.has_targets(session)
+    logger.info(
+        "Финализация заявки id=%s user_id=%s period=%s: client=%s targets=%s",
+        payment.id,
+        payment.user_id,
+        payment.period_days,
+        "есть" if client else "нет",
+        targets,
+    )
 
     if client is None and not targets:
         payment.status = PaymentStatus.FAILED
@@ -135,6 +146,13 @@ async def _extend_and_finalize(
     else:
         results = await _apply_panels(session, client, new_expiry, updater)
     failed = [r for r in results if not r.ok]
+    logger.info(
+        "Заявка id=%s: новый срок=%s, серверов_ок=%s, ошибок=%s",
+        payment.id,
+        new_expiry.isoformat(),
+        sum(1 for r in results if r.ok),
+        len(failed),
+    )
 
     if failed:
         payment.status = PaymentStatus.FAILED
@@ -189,6 +207,12 @@ async def confirm_payment(
     payment = await repo.get_by_id(payment_id)
     if payment is None:
         raise BillingError("Заявка не найдена")
+    logger.info(
+        "confirm_payment: id=%s статус=%s actor=%s",
+        payment.id,
+        payment.status.value,
+        actor_user_id,
+    )
 
     if payment.status == PaymentStatus.APPLIED:
         return BillingResult(payment=payment, applied=False, already_applied=True)
@@ -308,6 +332,13 @@ async def grant_trial(
     user = await session.get(User, user_id)
     if user is None:
         raise BillingError("Пользователь не найден")
+    logger.info(
+        "grant_trial: user_id=%s public_id=%s trial_used=%s period=%s",
+        user.id,
+        user.public_id,
+        user.trial_used,
+        period_days,
+    )
 
     if user.trial_used:
         return TrialResult(applied=False, already_used=True)
@@ -328,6 +359,13 @@ async def grant_trial(
     else:
         results = await _apply_panels(session, client, new_expiry, updater)
     failed = [r for r in results if not r.ok]
+    logger.info(
+        "grant_trial: user_id=%s новый срок=%s ок=%s ошибок=%s",
+        user_id,
+        new_expiry.isoformat(),
+        sum(1 for r in results if r.ok),
+        len(failed),
+    )
 
     if failed:
         # Ничего не сохраняем: пробный период остаётся доступным для повторной попытки.

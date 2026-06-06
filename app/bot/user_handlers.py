@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -15,6 +17,8 @@ from app.db.models import User
 from app.db.repositories import PaymentRepository, VpnClientRepository
 from app.services import billing, payments, plans, subscriptions
 from app.services.xui_updater import build_updater
+
+logger = logging.getLogger(__name__)
 
 router = Router(name="user")
 
@@ -58,11 +62,24 @@ async def trial(
     db_user: User,
     settings: Settings,
 ) -> None:
+    logger.info(
+        "Пользователь tg=%s (id=%s) запросил пробный период",
+        db_user.telegram_id,
+        db_user.id,
+    )
     result = await billing.grant_trial(
         session,
         user_id=db_user.id,
         updater=build_updater(timeout=float(settings.xui_request_timeout)),
         period_days=settings.trial_period_days,
+    )
+    logger.info(
+        "Результат триала tg=%s: applied=%s already=%s no_client=%s failed=%s",
+        db_user.telegram_id,
+        result.applied,
+        result.already_used,
+        result.no_client,
+        [r.server_id for r in result.failed_servers],
     )
     if result.already_used:
         await message.answer(texts.trial_already_used())

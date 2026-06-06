@@ -321,6 +321,10 @@ def admin_servers(servers: list) -> str:
             lines.append(
                 f"   inbound {inb.inbound_id}: {inb.protocol.value}{flow}{on}"
             )
+    lines.append(
+        "\nУдалить лишний inbound: /delinbound <server_id> <inbound_id>"
+    )
+    lines.append("Удалить все inbound'ы сервера: /clearinbounds <server_id>")
     return "\n".join(lines)
 
 
