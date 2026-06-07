@@ -88,13 +88,16 @@ def test_pick_panel_client_secret_prefers_uuid_over_numeric_id():
 
 def test_merge_client_record_preserves_secrets():
     existing = {
-        "id": "vless-uuid",
+        "id": 42,
+        "uuid": "vless-uuid",
         "password": "trojan-pass",
         "auth": "hysteria-auth",
         "email": "dimatest",
         "subId": "test",
         "expiryTime": 0,
         "enable": True,
+        "createdAt": 123456,
+        "comment": "legacy",
     }
     merged = merge_client_record_for_update(
         existing,
@@ -107,3 +110,21 @@ def test_merge_client_record_preserves_secrets():
     assert merged["auth"] == "hysteria-auth"
     assert merged["expiryTime"] == 1_900_000_000_000
     assert merged["enable"] is True
+    assert "createdAt" not in merged
+    assert "comment" not in merged
+
+
+def test_sanitize_client_for_api():
+    from app.services.xui_payloads import sanitize_client_for_api
+
+    body = {
+        "id": 99,
+        "uuid": "550e8400-e29b-41d4-a716-446655440000",
+        "email": "asya",
+        "subId": "asya",
+        "enable": True,
+        "updatedAt": 1,
+    }
+    clean = sanitize_client_for_api(body)
+    assert clean["id"] == "550e8400-e29b-41d4-a716-446655440000"
+    assert "updatedAt" not in clean

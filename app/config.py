@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     payment_period_days: int = 30
     trial_period_days: int = 3
     payment_details_text: str = (
-        "<code>+79013855871</code> (Альфа-банк по СБП)\n"
-        "<code>2204 3203 4452 2539</code> (Озон-банк на карту)"
+        "<code>+70000000000</code> (банк по СБП)\n"
+        "<code>0000 0000 0000 0000</code> (банк на карту)"
     )
     support_contact: str = "@support"
 

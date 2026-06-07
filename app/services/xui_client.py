@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -21,6 +22,10 @@ _CSRF_HEADER = "X-CSRF-Token"
 
 class XuiError(Exception):
     """Базовая ошибка взаимодействия с панелью 3x-ui."""
+
+
+def _quote_path_segment(value: str) -> str:
+    return quote(value, safe="")
 
 
 class XuiAuthError(XuiError):
@@ -371,7 +376,7 @@ class XuiClient:
             )
 
         updated = {**client, **changes}
-        path_id = self._path_identifier(client)
+        path_id = _quote_path_segment(self._path_identifier(client))
         payload = {
             "id": inbound_id,
             "settings": json.dumps({"clients": [updated]}),
@@ -589,8 +594,9 @@ class XuiClient:
 
         None — если клиент не найден.
         """
+        encoded = _quote_path_segment(email)
         response = await self._api(
-            "GET", f"/panel/api/clients/get/{email}"
+            "GET", f"/panel/api/clients/get/{encoded}"
         )
         try:
             data = response.json()
@@ -600,6 +606,30 @@ class XuiClient:
             return None
         obj = data.get("obj")
         return obj if isinstance(obj, dict) else None
+
+    async def find_client_record_by_sub_id(
+        self, sub_id: str
+    ) -> dict[str, Any] | None:
+        """Ищет клиента по subId (email в панели может отличаться от public_id)."""
+        if not sub_id:
+            return None
+        try:
+            records = await self.list_client_records()
+        except XuiError:
+            return None
+        for item in records:
+            nested = item.get("client") if isinstance(item, dict) else None
+            body = nested if isinstance(nested, dict) else item
+            if not isinstance(body, dict):
+                continue
+            if str(body.get("subId") or "") != sub_id:
+                continue
+            email = str(body.get("email") or "")
+            if email:
+                full = await self.get_client_record(email)
+                if full is not None:
+                    return full
+        return None
 
     async def create_client_record(
         self, client_obj: dict[str, Any], inbound_ids: list[int]
@@ -640,7 +670,8 @@ class XuiClient:
         inbound_ids: list[int] | None = None,
     ) -> None:
         """Обновляет глобального клиента по email (новый API)."""
-        path = f"/panel/api/clients/update/{email}"
+        encoded = _quote_path_segment(email)
+        path = f"/panel/api/clients/update/{encoded}"
         if inbound_ids is not None:
             ids = ",".join(str(i) for i in inbound_ids)
             path = f"{path}?inboundIds={ids}"
@@ -668,8 +699,9 @@ class XuiClient:
 
     async def get_client_traffic(self, email: str) -> dict[str, Any] | None:
         """Возвращает статистику трафика клиента по email."""
+        encoded = _quote_path_segment(email)
         response = await self._api(
-            "GET", f"/panel/api/inbounds/getClientTraffics/{email}"
+            "GET", f"/panel/api/inbounds/getClientTraffics/{encoded}"
         )
         data = self._parse_json(response)
         if not data.get("success", False):

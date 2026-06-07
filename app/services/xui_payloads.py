@@ -151,7 +151,58 @@ def merge_client_record_for_update(
     merged["expiryTime"] = expiry_ms
     if flow and not merged.get("flow"):
         merged["flow"] = flow
-    return merged
+    return sanitize_client_for_api(merged)
+
+
+_CLIENT_API_FIELDS = frozenset(
+    {
+        "id",
+        "email",
+        "password",
+        "auth",
+        "subId",
+        "enable",
+        "expiryTime",
+        "limitIp",
+        "totalGB",
+        "tgId",
+        "reset",
+        "flow",
+        "method",
+    }
+)
+
+
+def _client_uuid_for_api(body: dict[str, Any]) -> str | None:
+    """UUID vless/vmess для поля ``id`` в clients/update (строка, не DB-ключ)."""
+    uuid_val = body.get("uuid")
+    if isinstance(uuid_val, str) and uuid_val and not _looks_like_db_id(uuid_val):
+        return uuid_val
+    id_val = body.get("id")
+    if isinstance(id_val, str) and id_val and not _looks_like_db_id(id_val):
+        return id_val
+    return None
+
+
+def sanitize_client_for_api(body: dict[str, Any]) -> dict[str, Any]:
+    """Оставляет только поля model.Client и исправляет ``id`` (строковый UUID).
+
+    Ответ ``clients/get`` может содержать числовой DB-ключ в ``id``, метаданные
+    ``createdAt``/``updatedAt`` и т.п. — их нельзя отправлять в clients/update.
+    """
+    result: dict[str, Any] = {
+        key: body[key] for key in _CLIENT_API_FIELDS if key in body
+    }
+    uuid_str = _client_uuid_for_api(body)
+    if uuid_str:
+        result["id"] = uuid_str
+    elif "id" in result:
+        id_val = result["id"]
+        if isinstance(id_val, int) or (
+            isinstance(id_val, str) and _looks_like_db_id(id_val)
+        ):
+            del result["id"]
+    return result
 
 
 def client_identifier(protocol: Protocol, *, client_uuid: str, email: str) -> str:

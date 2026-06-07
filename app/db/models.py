@@ -12,6 +12,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -63,6 +64,7 @@ class User(Base, TimestampMixin):
 
 class VpnClient(Base):
     __tablename__ = "vpn_clients"
+    __table_args__ = (UniqueConstraint("user_id", name="uq_vpn_clients_user_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(
@@ -130,6 +132,13 @@ class ServerInbound(Base):
     """
 
     __tablename__ = "server_inbounds"
+    __table_args__ = (
+        UniqueConstraint(
+            "server_id",
+            "inbound_id",
+            name="uq_server_inbounds_server_inbound",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     server_id: Mapped[int] = mapped_column(
@@ -151,6 +160,14 @@ class ServerInbound(Base):
 
 class ClientServerMapping(Base):
     __tablename__ = "client_server_mappings"
+    __table_args__ = (
+        UniqueConstraint(
+            "vpn_client_id",
+            "server_id",
+            "inbound_id",
+            name="uq_client_server_mappings_client_server_inbound",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     vpn_client_id: Mapped[int] = mapped_column(
@@ -201,6 +218,10 @@ class PaymentRequest(Base):
         DateTime(timezone=True), nullable=True
     )
     applied_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Целевой срок доступа, зафиксированный до обновления панелей (для идемпотентного retry).
+    target_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 

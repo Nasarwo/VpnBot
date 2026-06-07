@@ -259,7 +259,7 @@ async def test_get_client_traffic(httpx_mock: HTTPXMock):
     )
     httpx_mock.add_response(
         method="GET",
-        url=f"{BASE}/panel/api/inbounds/getClientTraffics/e@local",
+        url=f"{BASE}/panel/api/inbounds/getClientTraffics/e%40local",
         json={"success": True, "obj": {"email": "e@local", "up": 10, "down": 20}},
     )
     async with _client() as client:

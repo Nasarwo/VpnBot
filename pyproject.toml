@@ -21,7 +21,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-httpx>=0.30",
     "ruff>=0.5",
-    "mypy>=1.10",
+    "mypy==1.11.2",
 ]
 
 [build-system]
