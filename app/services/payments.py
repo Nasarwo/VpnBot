@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import secrets
+
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.enums import AttachmentType, PaymentStatus
@@ -7,11 +10,11 @@ from app.db.models import PaymentAttachment, PaymentRequest
 from app.db.repositories import PaymentRepository
 from app.services import audit
 
-PAYMENT_CODE_BASE = 1042
+_PAYMENT_CODE_ATTEMPTS = 5
 
 
-def _format_code(seq: int) -> str:
-    return f"PAY-{PAYMENT_CODE_BASE + seq}"
+def _new_payment_code() -> str:
+    return f"PAY-{secrets.token_hex(4).upper()}"
 
 
 async def create_request(
@@ -37,23 +40,33 @@ async def create_request(
             await session.commit()
         return existing
 
-    seq = await repo.count()
-    payment_code = _format_code(seq)
-    payment = await repo.create(
-        user_id=user_id,
-        amount=amount,
-        period_days=period_days,
-        payment_code=payment_code,
-        currency=currency,
-        status=PaymentStatus.WAITING_ADMIN,
-    )
+    payment: PaymentRequest | None = None
+    for _ in range(_PAYMENT_CODE_ATTEMPTS):
+        payment_code = _new_payment_code()
+        try:
+            payment = await repo.create(
+                user_id=user_id,
+                amount=amount,
+                period_days=period_days,
+                payment_code=payment_code,
+                currency=currency,
+                status=PaymentStatus.WAITING_ADMIN,
+            )
+            await session.commit()
+            break
+        except IntegrityError:
+            await session.rollback()
+
+    if payment is None:
+        raise RuntimeError("Не удалось сгенерировать уникальный payment_code")
+
     await audit.record(
         session,
         action="payment.created",
         actor_user_id=user_id,
         entity_type="payment_request",
         entity_id=payment.id,
-        payload={"payment_code": payment_code, "amount": amount},
+        payload={"payment_code": payment.payment_code, "amount": amount},
     )
     await session.commit()
     return payment

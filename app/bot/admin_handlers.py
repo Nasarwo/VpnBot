@@ -1217,9 +1217,13 @@ async def manual_extend(
             f"Клиент продлён до {result.new_expires_at:%d.%m.%Y %H:%M UTC}"
         )
         await notify.notify_user_extended(message.bot, telegram_id, client)
-    else:
+    elif result.failed_servers:
         servers = ", ".join(str(r.server_id) for r in result.failed_servers)
         await message.answer(f"Не удалось обновить серверы: {servers}")
+    else:
+        await message.answer(
+            "Нет активных привязок к серверам — срок в базе не изменён"
+        )
 
 
 @router.message(Command("sync"))

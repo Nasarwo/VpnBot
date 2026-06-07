@@ -95,13 +95,15 @@ async def test_provision_server_new_api_updates_existing(httpx_mock: HTTPXMock):
             "success": True,
             "obj": {
                 "client": {
-                    "id": "uuid-1",
+                    "id": 42,
+                    "uuid": "uuid-1",
                     "email": "PUB123",
                     "subId": "PUB123",
                     "password": "trojan-pass",
                     "auth": "hysteria-auth",
                     "expiryTime": 1,
                     "enable": False,
+                    "createdAt": 999,
                 },
                 "inboundIds": [10, 11],
             },
@@ -120,10 +122,81 @@ async def test_provision_server_new_api_updates_existing(httpx_mock: HTTPXMock):
         if r.url.path.endswith("/clients/update/PUB123")
     ][0]
     body = json.loads(upd_req.content)
-    # Секреты панели сохранены, обновлены только срок и enable.
     assert body["id"] == "uuid-1"
     assert body["password"] == "trojan-pass"
     assert body["auth"] == "hysteria-auth"
     assert body["subId"] == "PUB123"
     assert body["expiryTime"] == 1_800_000_000_000
     assert body["enable"] is True
+    assert "createdAt" not in body
+
+
+async def test_provision_server_finds_client_by_sub_id(httpx_mock: HTTPXMock):
+    _mock_auth(httpx_mock)
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{BASE}/panel/api/clients/get/__caps_probe__",
+        json={"success": False},
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{BASE}/panel/api/clients/get/asya2",
+        json={"success": False, "msg": "not found"},
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{BASE}/panel/api/clients/list",
+        json={
+            "success": True,
+            "obj": [
+                {
+                    "client": {
+                        "email": "asya",
+                        "subId": "PUB123",
+                        "id": "uuid-asya",
+                    },
+                    "inboundIds": [10],
+                }
+            ],
+        },
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{BASE}/panel/api/clients/get/asya",
+        json={
+            "success": True,
+            "obj": {
+                "client": {
+                    "id": "uuid-asya",
+                    "email": "asya",
+                    "subId": "PUB123",
+                    "expiryTime": 0,
+                    "enable": True,
+                },
+                "inboundIds": [10],
+            },
+        },
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/panel/api/clients/update/asya?inboundIds=10,11",
+        json={"success": True},
+    )
+
+    spec = ServerProvision(
+        email="asya2",
+        sub_id="PUB123",
+        client_uuid="uuid-asya",
+        password="pass",
+        inbounds=_spec().inbounds,
+    )
+    await XuiPanelUpdater().provision_server(_server(), spec, 0)
+
+    upd = [
+        r for r in httpx_mock.get_requests()
+        if "/clients/update/asya" in r.url.path
+    ]
+    assert len(upd) == 1
+    add = [r for r in httpx_mock.get_requests() if r.url.path.endswith("/clients/add")]
+    assert not add

@@ -77,6 +77,13 @@ class XuiPanelUpdater:
         expiry_ms: int,
     ) -> None:
         existing_record = await client.get_client_record(spec.email)
+        if (
+            existing_record is None
+            and spec.sub_id
+            and spec.sub_id != spec.email
+        ):
+            existing_record = await client.find_client_record_by_sub_id(spec.sub_id)
+
         if existing_record is None:
             client_obj = build_client_record(
                 client_uuid=spec.client_uuid,
@@ -94,9 +101,10 @@ class XuiPanelUpdater:
             raise XuiError(
                 f"Некорректный ответ панели для клиента {spec.email}"
             )
+        panel_email = str(existing_body.get("email") or spec.email)
         client_obj = merge_client_record_for_update(
             existing_body,
-            email=spec.email,
+            email=panel_email,
             sub_id=spec.sub_id,
             expiry_ms=expiry_ms,
             flow=flow,
@@ -108,7 +116,7 @@ class XuiPanelUpdater:
         ]
         merged_inbound_ids = sorted(set(existing_inbound_ids) | set(inbound_ids))
         await client.update_client_record(
-            spec.email, client_obj, inbound_ids=merged_inbound_ids
+            panel_email, client_obj, inbound_ids=merged_inbound_ids
         )
 
     async def _provision_legacy(

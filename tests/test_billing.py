@@ -146,19 +146,62 @@ async def test_retry_after_failure_succeeds(
 ):
     payment = await _make_waiting_payment(session, user)
     failing = MockPanelUpdater(fail_server_ids={server.id})
+    now = utcnow()
     await billing.confirm_payment(
-        session, payment.id, actor_user_id=user.id, updater=failing
+        session, payment.id, actor_user_id=user.id, updater=failing, now=now
     )
 
+    failed = await PaymentRepository(session).get_by_id(payment.id)
+    assert failed.target_expires_at is not None
+    target = billing._as_aware(failed.target_expires_at)
+
+    later = now + timedelta(days=5)
     healthy = MockPanelUpdater()
     result = await billing.retry_payment(
-        session, payment.id, actor_user_id=user.id, updater=healthy
+        session, payment.id, actor_user_id=user.id, updater=healthy, now=later
     )
 
     assert result.applied is True
     assert result.payment.status == PaymentStatus.APPLIED
+    assert billing._as_aware(result.new_expires_at) == target
     refreshed = await VpnClientRepository(session).get_for_user(user.id)
-    assert refreshed.expires_at is not None
+    assert billing._as_aware(refreshed.expires_at) == target
+
+
+async def test_manual_extend_fails_without_mappings(
+    session: AsyncSession, user: User
+):
+    client = VpnClient(user_id=user.id, is_active=False)
+    session.add(client)
+    await session.commit()
+
+    result = await billing.manual_extend(
+        session,
+        client.id,
+        period_days=30,
+        actor_user_id=user.id,
+        updater=MockPanelUpdater(),
+    )
+    assert result.applied is False
+    refreshed = await VpnClientRepository(session).get_for_user(user.id)
+    assert refreshed.expires_at is None
+
+
+async def test_confirm_stores_target_before_panel_failure(
+    session: AsyncSession, user: User, vpn_client: VpnClient, server
+):
+    payment = await _make_waiting_payment(session, user)
+    now = utcnow()
+    await billing.confirm_payment(
+        session,
+        payment.id,
+        actor_user_id=user.id,
+        updater=MockPanelUpdater(fail_server_ids={server.id}),
+        now=now,
+    )
+    refreshed = await PaymentRepository(session).get_by_id(payment.id)
+    assert billing._as_aware(refreshed.target_expires_at) == now + timedelta(days=30)
+    assert refreshed.status == PaymentStatus.FAILED
 
 
 async def test_confirm_requires_waiting_status(

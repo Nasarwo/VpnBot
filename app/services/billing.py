@@ -73,6 +73,48 @@ def expiry_to_ms(expiry: datetime) -> int:
     return int(expiry.timestamp() * 1000)
 
 
+def resolve_target_expiry(
+    payment: PaymentRequest,
+    client: VpnClient,
+    now: datetime,
+) -> datetime:
+    """Возвращает сохранённый target или вычисляет новый срок для первой попытки."""
+    saved = _as_aware(payment.target_expires_at)
+    if saved is not None:
+        return saved
+    return compute_new_expiry(client.expires_at, now, payment.period_days)
+
+
+async def _count_eligible_mappings(session: AsyncSession, client_id: int) -> int:
+    mapping_repo = MappingRepository(session)
+    mappings = await mapping_repo.list_for_client(client_id)
+    return sum(
+        1
+        for mapping in mappings
+        if mapping.enabled
+        and mapping.server is not None
+        and mapping.server.enabled
+    )
+
+
+def _evaluate_panel_results(
+    results: list[ServerUpdateResult],
+    *,
+    targets_mode: bool,
+    eligible_mappings: int,
+) -> tuple[list[ServerUpdateResult], str | None]:
+    failed = [r for r in results if not r.ok]
+    if failed:
+        return failed, None
+    if results:
+        return [], None
+    if targets_mode:
+        return [], "Нет доступных серверов или inbound'ов для обновления панели"
+    if eligible_mappings == 0:
+        return [], "Нет активных привязок к серверам для обновления панели"
+    return [], "Панели не обновлены: нет результатов"
+
+
 async def _apply_panels(
     session: AsyncSession,
     client: VpnClient,
@@ -98,6 +140,20 @@ async def _apply_panels(
     return results
 
 
+async def _persist_target_before_panels(
+    session: AsyncSession,
+    payment: PaymentRequest,
+    target_expiry: datetime,
+    now: datetime,
+) -> None:
+    """Фиксирует целевой срок и статус подтверждения до внешних вызовов к панелям."""
+    payment.target_expires_at = target_expiry
+    if payment.status == PaymentStatus.WAITING_ADMIN:
+        payment.status = PaymentStatus.CONFIRMED
+        payment.confirmed_at = now
+    await session.commit()
+
+
 async def _extend_and_finalize(
     session: AsyncSession,
     payment: PaymentRequest,
@@ -112,8 +168,6 @@ async def _extend_and_finalize(
     client = await client_repo.get_for_user(payment.user_id)
     targets = await provisioning.has_targets(session)
     if client is None and not targets:
-        # Серверы могли быть добавлены без импортированных inbound'ов —
-        # пробуем подтянуть их автоматически, прежде чем считать заявку проваленной.
         targets = await provisioning.ensure_inbounds_imported(session)
     logger.info(
         "Финализация заявки id=%s user_id=%s period=%s: client=%s targets=%s",
@@ -142,7 +196,14 @@ async def _extend_and_finalize(
         assert user is not None
         client = await provisioning.ensure_vpn_client(session, user)
 
-    new_expiry = compute_new_expiry(client.expires_at, now, payment.period_days)
+    new_expiry = resolve_target_expiry(payment, client, now)
+    eligible_mappings = await _count_eligible_mappings(session, client.id)
+
+    await _persist_target_before_panels(session, payment, new_expiry, now)
+    await session.refresh(payment)
+    await session.refresh(client)
+    new_expiry = _as_aware(payment.target_expires_at) or new_expiry
+
     if targets:
         public_id = (user.public_id if user else None) or client.email or str(
             payment.user_id
@@ -152,20 +213,28 @@ async def _extend_and_finalize(
         )
     else:
         results = await _apply_panels(session, client, new_expiry, updater)
-    failed = [r for r in results if not r.ok]
+
+    failed, empty_error = _evaluate_panel_results(
+        results,
+        targets_mode=targets,
+        eligible_mappings=eligible_mappings,
+    )
     logger.info(
-        "Заявка id=%s: новый срок=%s, серверов_ок=%s, ошибок=%s",
+        "Заявка id=%s: целевой срок=%s, серверов_ок=%s, ошибок=%s",
         payment.id,
         new_expiry.isoformat(),
         sum(1 for r in results if r.ok),
-        len(failed),
+        len(failed) + (1 if empty_error else 0),
     )
 
-    if failed:
+    if empty_error or failed:
         payment.status = PaymentStatus.FAILED
-        payment.last_error = "; ".join(
-            f"server {r.server_id}: {r.error}" for r in failed
-        )
+        if empty_error:
+            payment.last_error = empty_error
+        else:
+            payment.last_error = "; ".join(
+                f"server {r.server_id}: {r.error}" for r in failed
+            )
         await audit.record(
             session,
             action="billing.failed",
@@ -233,10 +302,6 @@ async def confirm_payment(
             f"Заявка в статусе {payment.status.value}, подтверждение невозможно"
         )
 
-    payment.status = PaymentStatus.CONFIRMED
-    payment.confirmed_at = now
-    await session.flush()
-
     return await _extend_and_finalize(session, payment, actor_user_id, updater, now)
 
 
@@ -280,11 +345,20 @@ async def manual_extend(
         raise BillingError("VPN-клиент не найден")
 
     new_expiry = compute_new_expiry(client.expires_at, now, period_days)
+    eligible = await _count_eligible_mappings(session, client.id)
     results = await _apply_panels(session, client, new_expiry, updater)
-    failed = [r for r in results if not r.ok]
-    if failed:
+    failed, empty_error = _evaluate_panel_results(
+        results,
+        targets_mode=False,
+        eligible_mappings=eligible,
+    )
+    if empty_error or failed:
         await session.commit()
-        return BillingResult(payment=None, applied=False, failed_servers=failed)
+        return BillingResult(
+            payment=None,
+            applied=False,
+            failed_servers=failed,
+        )
 
     client.expires_at = new_expiry
     client.is_active = True
@@ -358,7 +432,6 @@ async def grant_trial(
     client = await VpnClientRepository(session).get_for_user(user_id)
     targets = await provisioning.has_targets(session)
     if client is None and not targets:
-        # Серверы добавлены, но inbound'ы ещё не импортированы — пробуем импорт.
         targets = await provisioning.ensure_inbounds_imported(session)
     if client is None and not targets:
         return TrialResult(applied=False, no_client=True)
@@ -383,10 +456,8 @@ async def grant_trial(
     )
 
     if failed:
-        # Ничего не сохраняем: пробный период остаётся доступным для повторной попытки.
         return TrialResult(applied=False, failed_servers=failed)
 
-    # trial_used и новый срок фиксируются одной транзакцией только при успехе.
     user.trial_used = True
     client.expires_at = new_expiry
     client.is_active = True

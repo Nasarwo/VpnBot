@@ -15,13 +15,47 @@ from app.db.session import get_sessionmaker
 
 logger = logging.getLogger(__name__)
 
+_SENSITIVE_COMMANDS = frozenset({"addserver"})
+
+
+def _command_name(text: str) -> str:
+    token = text.split(maxsplit=1)[0]
+    if token.startswith("/"):
+        return token.split("@", 1)[0][1:].lower()
+    return ""
+
+
+def _describe_message(event: Message) -> str:
+    if event.text and event.text.startswith("/"):
+        name = _command_name(event.text)
+        if name in _SENSITIVE_COMMANDS:
+            return f"command:{name} [redacted]"
+        if " " in event.text.strip():
+            return f"command:{name} [args redacted]"
+        return f"command:{name}"
+
+    if event.caption:
+        return f"message:{event.content_type} caption[len={len(event.caption)}]"
+    if event.text:
+        return f"message:text[len={len(event.text)}]"
+    return f"message:{event.content_type}"
+
+
+def _describe_callback(event: CallbackQuery) -> str:
+    data = event.data or ""
+    if not data:
+        return "callback:empty"
+    parts = data.split(":")
+    if len(parts) >= 2:
+        return f"callback:{parts[0]} action={parts[1]}"
+    return f"callback:{parts[0]}"
+
 
 def _describe_event(event: TelegramObject) -> str:
     if isinstance(event, Message):
-        text = event.text or event.caption or f"<{event.content_type}>"
-        return f"message: {text!r}"
+        return _describe_message(event)
     if isinstance(event, CallbackQuery):
-        return f"callback: {event.data!r}"
+        return _describe_callback(event)
     return event.__class__.__name__
 
 
