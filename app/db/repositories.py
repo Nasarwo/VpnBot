@@ -95,6 +95,11 @@ class UserRepository:
         await self.session.flush()
         return user, True
 
+    async def delete_user(self, user: User) -> None:
+        """Удаляет пользователя и связанные записи (каскад в ORM)."""
+        await self.session.delete(user)
+        await self.session.flush()
+
 
 class VpnClientRepository:
     def __init__(self, session: AsyncSession) -> None:

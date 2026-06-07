@@ -38,6 +38,8 @@ def test_welcome_menu_active_vs_inactive():
     # Поддержка всегда зелёная
     assert inactive[3].text == texts.BTN_SUPPORT
     assert inactive[3].style == "success"
+    assert inactive[4].text == texts.BTN_RESET
+    assert inactive[4].style == "danger"
 
 
 def test_install_guides_keyboard_has_telegraph_links():
@@ -60,11 +62,24 @@ def test_welcome_menu_install_has_icon():
 
 def test_free_proxies_keyboard_links():
     buttons = _all_buttons(keyboards.free_proxies_keyboard())
-    assert len(buttons) == 5
-    for i, (label, url) in enumerate(texts.FREE_PROXY_ENTRIES):
-        assert buttons[i].text == label
-        assert buttons[i].url == url
+    assert buttons[0].text == texts.BTN_PROXY_1_MTProto
+    assert buttons[0].url == texts.FREE_PROXY_1_MTPROTO_URL
+    assert buttons[0].icon_custom_emoji_id == emoji.custom_emoji_id("connect")
+    assert buttons[1].text == texts.BTN_PROXY_1_SOCKS5
+    assert buttons[1].url == texts.FREE_PROXY_1_SOCKS5_URL
+    assert buttons[1].icon_custom_emoji_id == emoji.custom_emoji_id("server")
+    assert buttons[2].text == texts.BTN_PROXY_2_MTProto
+    assert buttons[2].url == texts.FREE_PROXY_2_MTPROTO_URL
+    assert buttons[3].text == texts.BTN_PROXY_2_SOCKS5
+    assert buttons[3].url == texts.FREE_PROXY_2_SOCKS5_URL
     assert buttons[4].text == texts.BTN_BACK
+
+
+def test_welcome_menu_free_proxies_has_icon():
+    inactive = _all_buttons(keyboards.welcome_menu(False))
+    proxy_btn = inactive[2]
+    assert proxy_btn.text == texts.BTN_FREE_PROXIES
+    assert proxy_btn.icon_custom_emoji_id == emoji.custom_emoji_id("globe")
 
 
 def test_purchase_keyboard_trial_visibility():

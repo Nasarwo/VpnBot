@@ -114,9 +114,39 @@ def welcome_menu(has_active: bool) -> InlineKeyboardMarkup:
     free_proxies = _btn(
         texts.BTN_FREE_PROXIES,
         callback_data=MenuCallback(action="free_proxies").pack(),
+        icon="globe",
+    )
+    reset = _btn(
+        texts.BTN_RESET,
+        callback_data=MenuCallback(action="reset").pack(),
+        style="danger",
+        icon="cancel",
     )
     return InlineKeyboardMarkup(
-        inline_keyboard=[[primary], [install], [free_proxies], [support]]
+        inline_keyboard=[[primary], [install], [free_proxies], [support], [reset]]
+    )
+
+
+def reset_bot_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Подтверждение сброса данных пользователя в боте."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _btn(
+                    texts.BTN_RESET_YES,
+                    callback_data=MenuCallback(action="reset_yes").pack(),
+                    style="danger",
+                    icon="cancel",
+                )
+            ],
+            [
+                _btn(
+                    texts.BTN_CANCEL,
+                    callback_data=MenuCallback(action="home").pack(),
+                    icon="back",
+                )
+            ],
+        ]
     )
 
 
@@ -146,13 +176,40 @@ def install_guides_keyboard() -> InlineKeyboardMarkup:
 
 
 def free_proxies_keyboard() -> InlineKeyboardMarkup:
-    """Кнопки подключения бесплатных прокси (deeplink Telegram)."""
-    rows = [
-        [_btn(label, url=url, style="primary")]
-        for label, url in texts.FREE_PROXY_ENTRIES
-    ]
-    rows.append([_back_button("home")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    """Бесплатные прокси Telegram — ссылки t.me/proxy и t.me/socks."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _btn(
+                    texts.BTN_PROXY_1_MTProto,
+                    url=texts.FREE_PROXY_1_MTPROTO_URL,
+                    style="primary",
+                    icon="connect",
+                ),
+                _btn(
+                    texts.BTN_PROXY_1_SOCKS5,
+                    url=texts.FREE_PROXY_1_SOCKS5_URL,
+                    style="primary",
+                    icon="server",
+                ),
+            ],
+            [
+                _btn(
+                    texts.BTN_PROXY_2_MTProto,
+                    url=texts.FREE_PROXY_2_MTPROTO_URL,
+                    style="primary",
+                    icon="connect",
+                ),
+                _btn(
+                    texts.BTN_PROXY_2_SOCKS5,
+                    url=texts.FREE_PROXY_2_SOCKS5_URL,
+                    style="primary",
+                    icon="server",
+                ),
+            ],
+            [_back_button("home")],
+        ]
+    )
 
 
 def news_channel_keyboard() -> InlineKeyboardMarkup:
