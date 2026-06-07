@@ -31,7 +31,7 @@ class MenuCallback(CallbackData, prefix="menu"):
     """Навигация по inline-меню (редактирование сообщения на месте).
 
     action: home | subscription | extend | connect | buy | support | install |
-            free_proxies | cancel_payment
+            free_proxies | cancel_payment | reset | reset_yes
     """
 
     action: str

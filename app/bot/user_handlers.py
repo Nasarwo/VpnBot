@@ -14,15 +14,16 @@ from app.bot import keyboards, notify, texts
 from app.bot.callbacks import MenuCallback, OnboardCallback, PlanCallback
 from app.bot.states import OnboardingStates, ProofStates
 from app.config import Settings
-from app.db.enums import AttachmentType
+from app.db.enums import AttachmentType, UserRole
 from app.db.models import User, VpnClient
 from app.db.repositories import (
     BindRequestRepository,
     PaymentRepository,
     ServerRepository,
+    UserRepository,
     VpnClientRepository,
 )
-from app.services import billing, bind_requests, payments, plans
+from app.services import audit, billing, bind_requests, payments, plans
 from app.services.subscription_link import (
     parse_subscription_public_id,
     subscription_link_example,
@@ -270,7 +271,64 @@ async def menu_nav(
             texts.support_message(settings.support_contact, db_user.public_id),
             keyboards.back_keyboard("home"),
         )
+    elif action == "reset":
+        await _edit(
+            callback,
+            texts.reset_bot_prompt(),
+            keyboards.reset_bot_confirm_keyboard(),
+        )
+    elif action == "reset_yes":
+        await _reset_bot_user(callback, session, db_user, settings, state)
+        return
     await callback.answer()
+
+
+async def _reset_bot_user(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    db_user: User,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    """Удаляет данные пользователя в боте и показывает онбординг заново."""
+    await state.clear()
+    telegram_id = db_user.telegram_id
+    username = db_user.username
+    first_name = db_user.first_name
+    old_user_id = db_user.id
+    old_public_id = db_user.public_id
+
+    await audit.record(
+        session,
+        action="user.self_reset",
+        actor_user_id=old_user_id,
+        entity_type="user",
+        entity_id=old_user_id,
+        payload={"telegram_id": telegram_id, "public_id": old_public_id},
+    )
+
+    repo = UserRepository(session)
+    await repo.delete_user(db_user)
+    await session.commit()
+
+    desired_role = (
+        UserRole.ADMIN if settings.is_admin(telegram_id) else UserRole.USER
+    )
+    await repo.get_or_create(
+        telegram_id=telegram_id,
+        username=username,
+        first_name=first_name,
+        role=desired_role,
+    )
+    await session.commit()
+
+    logger.info("Пользователь tg=%s сбросил данные бота", telegram_id)
+    await _edit(
+        callback,
+        texts.onboarding_legacy_question(),
+        keyboards.onboarding_legacy_keyboard(),
+    )
+    await callback.answer("Данные сброшены")
 
 
 @router.callback_query(PlanCallback.filter())
