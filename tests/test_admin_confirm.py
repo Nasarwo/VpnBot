@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot import notify
+from app.bot import notify, texts
 from app.config import Settings
 from app.db.models import User, VpnClient
 from app.db.repositories import PaymentRepository
@@ -58,6 +58,30 @@ async def test_confirm_then_notify_user(
 
     assert bot.messages[0]["chat_id"] == user.telegram_id
     assert "продл" in bot.messages[0]["text"].lower()
+
+
+async def test_first_purchase_sends_channel_prompt(
+    session: AsyncSession, user: User, vpn_client: VpnClient
+):
+    payment = await payments.create_request(
+        session, user_id=user.id, amount=175, period_days=30
+    )
+    result = await billing.confirm_payment(
+        session, payment.id, actor_user_id=user.id, updater=MockPanelUpdater()
+    )
+    assert result.first_purchase is True
+
+    bot = FakeBot()
+    await session.refresh(vpn_client)
+    await notify.notify_user_extended(
+        bot, user.telegram_id, vpn_client, first_purchase=True
+    )
+
+    assert len(bot.messages) == 2
+    markup = bot.messages[1]["reply_markup"]
+    btn = markup.inline_keyboard[0][0]
+    assert btn.url == texts.NEWS_CHANNEL_URL
+    assert "канал" in bot.messages[1]["text"].lower()
 
 
 async def test_reject_then_notify_user(session: AsyncSession, user: User):

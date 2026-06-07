@@ -32,6 +32,7 @@ def _btn(
     *,
     callback_data: str | None = None,
     copy: str | None = None,
+    url: str | None = None,
     style: str | None = None,
     icon: str | None = None,
 ) -> InlineKeyboardButton:
@@ -41,6 +42,8 @@ def _btn(
         kwargs["callback_data"] = callback_data
     if copy is not None:
         kwargs["copy_text"] = CopyTextButton(text=copy)
+    if url is not None:
+        kwargs["url"] = url
     if style is not None:
         kwargs["style"] = style
     if icon is not None:
@@ -103,7 +106,68 @@ def welcome_menu(has_active: bool) -> InlineKeyboardMarkup:
         style="success",
         icon="support",
     )
-    return InlineKeyboardMarkup(inline_keyboard=[[primary], [support]])
+    install = _btn(
+        texts.BTN_INSTALL,
+        callback_data=MenuCallback(action="install").pack(),
+        icon="install",
+    )
+    free_proxies = _btn(
+        texts.BTN_FREE_PROXIES,
+        callback_data=MenuCallback(action="free_proxies").pack(),
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[primary], [install], [free_proxies], [support]]
+    )
+
+
+def install_guides_keyboard() -> InlineKeyboardMarkup:
+    """Гайды по установке клиента — ссылки на Telegraph."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _btn(
+                    texts.BTN_GUIDE_WINDOWS,
+                    url=texts.INSTALL_GUIDE_WINDOWS_URL,
+                    style="primary",
+                    icon="laptop",
+                )
+            ],
+            [
+                _btn(
+                    texts.BTN_GUIDE_ANDROID_IOS,
+                    url=texts.INSTALL_GUIDE_ANDROID_IOS_URL,
+                    style="primary",
+                    icon="phone",
+                )
+            ],
+            [_back_button("home")],
+        ]
+    )
+
+
+def free_proxies_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки подключения бесплатных прокси (deeplink Telegram)."""
+    rows = [
+        [_btn(label, url=url, style="primary")]
+        for label, url in texts.FREE_PROXY_ENTRIES
+    ]
+    rows.append([_back_button("home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def news_channel_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка подписки на канал с новостями."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _btn(
+                    texts.BTN_NEWS_CHANNEL,
+                    url=texts.NEWS_CHANNEL_URL,
+                    style="primary",
+                )
+            ]
+        ]
+    )
 
 
 def subscription_menu() -> InlineKeyboardMarkup:

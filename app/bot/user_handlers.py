@@ -252,6 +252,18 @@ async def menu_nav(
             texts.purchase_info(show_trial),
             keyboards.purchase_plans_keyboard(show_trial),
         )
+    elif action == "install":
+        await _edit(
+            callback,
+            texts.install_guides_intro(),
+            keyboards.install_guides_keyboard(),
+        )
+    elif action == "free_proxies":
+        await _edit(
+            callback,
+            texts.free_proxies_intro(),
+            keyboards.free_proxies_keyboard(),
+        )
     elif action == "support":
         await _edit(
             callback,

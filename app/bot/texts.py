@@ -10,6 +10,8 @@ from app.db.models import PaymentRequest, Server, User, VpnClient
 # Кнопки пользовательского меню (inline)
 BTN_MY_SUBSCRIPTION = "Моя подписка"
 BTN_BUY = "Оформить подписку"
+BTN_INSTALL = "Как установить"
+BTN_FREE_PROXIES = "Бесплатные прокси"
 BTN_SUPPORT = "Поддержка"
 BTN_EXTEND = "Продлить"
 BTN_CONNECT = "Подключение"
@@ -18,6 +20,42 @@ BTN_BACK = "Назад"
 BTN_CANCEL = "Отмена"
 BTN_ONBOARD_YES = "Да, была подписка"
 BTN_ONBOARD_NO = "Нет, я новый пользователь"
+BTN_GUIDE_WINDOWS = "Windows"
+BTN_GUIDE_ANDROID_IOS = "Android & IOS"
+
+INSTALL_GUIDE_WINDOWS_URL = (
+    "https://telegra.ph/Gajd-po-podklyucheniyu-Windows--07062026-06-07"
+)
+INSTALL_GUIDE_ANDROID_IOS_URL = (
+    "https://telegra.ph/Gajd-po-podklyucheniyu-Android--IOS--07062026-06-07"
+)
+
+NEWS_CHANNEL_URL = "https://t.me/+FJMJEtjqREU3ODQy"
+BTN_NEWS_CHANNEL = "Подписаться на канал"
+
+# Бесплатные прокси для Telegram (deeplink t.me/proxy и t.me/socks).
+FREE_PROXY_ENTRIES: tuple[tuple[str, str], ...] = (
+    (
+        "#1 — MTProto",
+        "https://t.me/proxy?server=mind-forge.tech&port=4430"
+        "&secret=eeeb8adbf3edbf33bc3ec8598fff8925686d696e642d666f7267652e74656368",
+    ),
+    (
+        "#1 — SOCKS5",
+        "https://t.me/socks?server=mind-forge.tech&port=1080"
+        "&user=mindforge&pass=lsNLects99bHHZkAPa8VncEw",
+    ),
+    (
+        "#2 — MTProto",
+        "https://t.me/proxy?server=nasarwo.pro&port=4430"
+        "&secret=ee3bd225a4e7ff0a76e932ec2f63ab89676e61736172776f2e70726f",
+    ),
+    (
+        "#2 — SOCKS5",
+        "https://t.me/socks?server=nasarwo.pro&port=1080"
+        "&user=nasarwo&pass=nasarwo_socks",
+    ),
+)
 
 # Дословный текст акции «приведи друга» (используется при продлении и оформлении).
 REFERRAL_PROMO = (
@@ -56,6 +94,19 @@ def welcome(user: User) -> str:
         f"Ваш ID: <code>{public_id}</code>\n"
         "Сообщите этот ID при обращении в поддержку.\n\n"
         "Выберите действие в меню."
+    )
+
+
+def install_guides_intro() -> str:
+    return (
+        "Доступные гайды по настройке клиент-приложений под разные системы."
+    )
+
+
+def free_proxies_intro() -> str:
+    return (
+        "Бесплатные прокси для Telegram, существующие благодаря пользователям "
+        "этого сервиса. Можно свободно распространять."
     )
 
 
@@ -328,6 +379,13 @@ def access_extended(client: VpnClient) -> str:
         f"{emoji.tg('ok')} Доступ продлён.\n"
         f"Новый срок действия: {_fmt_date(client.expires_at)}\n\n"
         "Актуальные ссылки — в разделе «Моя подписка» → «Подключение»."
+    )
+
+
+def first_purchase_channel_prompt() -> str:
+    return (
+        "Подпишитесь на наш канал с новостями о сервисе — "
+        "там публикуем важные объявления и обновления."
     )
 
 

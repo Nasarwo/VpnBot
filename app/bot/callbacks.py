@@ -30,7 +30,8 @@ class PlanCallback(CallbackData, prefix="plan"):
 class MenuCallback(CallbackData, prefix="menu"):
     """Навигация по inline-меню (редактирование сообщения на месте).
 
-    action: home | subscription | extend | connect | buy | support | cancel_payment
+    action: home | subscription | extend | connect | buy | support | install |
+            free_proxies | cancel_payment
     """
 
     action: str

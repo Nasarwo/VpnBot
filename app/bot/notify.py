@@ -54,7 +54,11 @@ async def forward_proof_to_admins(
 
 
 async def notify_user_extended(
-    bot: Bot, telegram_id: int, client: VpnClient
+    bot: Bot,
+    telegram_id: int,
+    client: VpnClient,
+    *,
+    first_purchase: bool = False,
 ) -> None:
     try:
         await bot.send_message(
@@ -62,6 +66,23 @@ async def notify_user_extended(
         )
     except TelegramAPIError:
         logger.warning("Не удалось уведомить пользователя %s", telegram_id)
+        return
+    if first_purchase:
+        await notify_first_purchase_channel(bot, telegram_id)
+
+
+async def notify_first_purchase_channel(bot: Bot, telegram_id: int) -> None:
+    try:
+        await bot.send_message(
+            telegram_id,
+            texts.first_purchase_channel_prompt(),
+            reply_markup=keyboards.news_channel_keyboard(),
+        )
+    except TelegramAPIError:
+        logger.warning(
+            "Не удалось отправить приглашение в канал пользователю %s",
+            telegram_id,
+        )
 
 
 async def notify_user_expiry(

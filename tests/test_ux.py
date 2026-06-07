@@ -4,7 +4,7 @@ from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot import keyboards, texts
+from app.bot import emoji, keyboards, texts
 from app.bot.callbacks import MenuCallback
 from app.bot.user_handlers import _cancel_payment, _is_active, _trial_available
 from app.db.enums import AttachmentType, PaymentStatus
@@ -33,9 +33,38 @@ def test_welcome_menu_active_vs_inactive():
 
     inactive = _all_buttons(keyboards.welcome_menu(False))
     assert inactive[0].text == texts.BTN_BUY
+    assert inactive[1].text == texts.BTN_INSTALL
+    assert inactive[2].text == texts.BTN_FREE_PROXIES
     # Поддержка всегда зелёная
-    assert inactive[1].text == texts.BTN_SUPPORT
-    assert inactive[1].style == "success"
+    assert inactive[3].text == texts.BTN_SUPPORT
+    assert inactive[3].style == "success"
+
+
+def test_install_guides_keyboard_has_telegraph_links():
+    buttons = _all_buttons(keyboards.install_guides_keyboard())
+    assert buttons[0].text == texts.BTN_GUIDE_WINDOWS
+    assert buttons[0].url == texts.INSTALL_GUIDE_WINDOWS_URL
+    assert buttons[0].icon_custom_emoji_id
+    assert buttons[1].text == texts.BTN_GUIDE_ANDROID_IOS
+    assert buttons[1].url == texts.INSTALL_GUIDE_ANDROID_IOS_URL
+    assert buttons[1].icon_custom_emoji_id
+    assert buttons[2].text == texts.BTN_BACK
+
+
+def test_welcome_menu_install_has_icon():
+    inactive = _all_buttons(keyboards.welcome_menu(False))
+    install_btn = inactive[1]
+    assert install_btn.text == texts.BTN_INSTALL
+    assert install_btn.icon_custom_emoji_id == emoji.custom_emoji_id("install")
+
+
+def test_free_proxies_keyboard_links():
+    buttons = _all_buttons(keyboards.free_proxies_keyboard())
+    assert len(buttons) == 5
+    for i, (label, url) in enumerate(texts.FREE_PROXY_ENTRIES):
+        assert buttons[i].text == label
+        assert buttons[i].url == url
+    assert buttons[4].text == texts.BTN_BACK
 
 
 def test_purchase_keyboard_trial_visibility():
