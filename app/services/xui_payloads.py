@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from app.db.enums import Protocol
 
 
@@ -93,6 +95,63 @@ def build_client_record(
     if flow:
         obj["flow"] = flow
     return obj
+
+
+def _looks_like_db_id(value: str) -> bool:
+    """Числовой id из ClientRecord панели — не UUID клиента."""
+    return value.isdigit()
+
+
+def pick_panel_client_secret(client: dict[str, Any]) -> str:
+    """Извлекает стабильный секрет клиента из объекта панели (clients/get).
+
+    Не использует числовой DB-ключ в поле ``id`` — только UUID/пароль/auth.
+    """
+    uuid_val = client.get("uuid")
+    if isinstance(uuid_val, str) and uuid_val and not _looks_like_db_id(uuid_val):
+        return uuid_val
+    id_val = client.get("id")
+    if isinstance(id_val, str) and id_val and not _looks_like_db_id(id_val):
+        return id_val
+    for key in ("password", "auth"):
+        val = client.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return ""
+
+
+def client_record_body(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Извлекает model.Client из ответа ``clients/get``."""
+    nested = record.get("client")
+    if isinstance(nested, dict):
+        return dict(nested)
+    if "email" in record:
+        return dict(record)
+    return None
+
+
+def merge_client_record_for_update(
+    existing: dict[str, Any],
+    *,
+    email: str,
+    sub_id: str,
+    expiry_ms: int,
+    enable: bool = True,
+    flow: str | None = None,
+) -> dict[str, Any]:
+    """Тело ``clients/update``: сохраняет секреты панели, меняет срок и enable.
+
+    Поля ``id``, ``password``, ``auth``, ``method`` и пр. не перезаписываются —
+    иначе ломаются мультипротокольные клиенты (hysteria auth ≠ vless uuid).
+    """
+    merged = dict(existing)
+    merged["email"] = email
+    merged["subId"] = sub_id
+    merged["enable"] = enable
+    merged["expiryTime"] = expiry_ms
+    if flow and not merged.get("flow"):
+        merged["flow"] = flow
+    return merged
 
 
 def client_identifier(protocol: Protocol, *, client_uuid: str, email: str) -> str:

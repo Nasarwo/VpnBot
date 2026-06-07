@@ -25,6 +25,7 @@ from app.services.panel_updater import (
     ServerUpdateResult,
 )
 from app.services.xui_client import XuiClient, XuiError
+from app.services.xui_payloads import pick_panel_client_secret
 
 # Сопоставление протокола из панели/xray с нашим Enum.
 logger = logging.getLogger(__name__)
@@ -385,10 +386,20 @@ async def list_panel_clients(
 
 
 def _pick_secret(*values: object) -> str:
+    """Fallback для legacy API: первое непустое строковое значение."""
     for value in values:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def _panel_client_secret(client: dict[str, object]) -> str:
+    secret = pick_panel_client_secret(client)  # type: ignore[arg-type]
+    if secret:
+        return secret
+    return _pick_secret(
+        client.get("uuid"), client.get("id"), client.get("password"), client.get("auth")
+    )
 
 
 async def find_panel_client(
@@ -413,9 +424,7 @@ async def find_panel_client(
                     for i in (record.get("inboundIds") or [])
                     if isinstance(i, int)
                 ]
-                secret = _pick_secret(
-                    c.get("uuid"), c.get("id"), c.get("password"), c.get("auth")
-                )
+                secret = _panel_client_secret(c)
                 return PanelClientInfo(
                     email=str(c.get("email") or email),
                     sub_id=str(c.get("subId") or ""),

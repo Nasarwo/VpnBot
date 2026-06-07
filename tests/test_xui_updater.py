@@ -98,6 +98,8 @@ async def test_provision_server_new_api_updates_existing(httpx_mock: HTTPXMock):
                     "id": "uuid-1",
                     "email": "PUB123",
                     "subId": "PUB123",
+                    "password": "trojan-pass",
+                    "auth": "hysteria-auth",
                     "expiryTime": 1,
                     "enable": False,
                 },
@@ -107,7 +109,7 @@ async def test_provision_server_new_api_updates_existing(httpx_mock: HTTPXMock):
     )
     httpx_mock.add_response(
         method="POST",
-        url=f"{BASE}/panel/api/clients/update/PUB123",
+        url=f"{BASE}/panel/api/clients/update/PUB123?inboundIds=10,11",
         json={"success": True},
     )
 
@@ -118,8 +120,10 @@ async def test_provision_server_new_api_updates_existing(httpx_mock: HTTPXMock):
         if r.url.path.endswith("/clients/update/PUB123")
     ][0]
     body = json.loads(upd_req.content)
-    # Поля клиента сохранены, обновлены только срок и enable.
+    # Секреты панели сохранены, обновлены только срок и enable.
     assert body["id"] == "uuid-1"
+    assert body["password"] == "trojan-pass"
+    assert body["auth"] == "hysteria-auth"
     assert body["subId"] == "PUB123"
     assert body["expiryTime"] == 1_800_000_000_000
     assert body["enable"] is True

@@ -132,7 +132,10 @@ async def notify_user_bind_rejected(
 ) -> None:
     try:
         await bot.send_message(
-            telegram_id, texts.bind_request_rejected(request_code), parse_mode="HTML"
+            telegram_id,
+            texts.bind_request_rejected(request_code),
+            reply_markup=keyboards.onboarding_legacy_keyboard(),
+            parse_mode="HTML",
         )
     except TelegramAPIError:
         logger.warning("Не удалось уведомить пользователя %s", telegram_id)

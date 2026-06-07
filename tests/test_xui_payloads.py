@@ -7,6 +7,8 @@ from app.services.xui_payloads import (
     UnsupportedProtocolError,
     build_client_object,
     client_identifier,
+    merge_client_record_for_update,
+    pick_panel_client_secret,
 )
 
 COMMON = {
@@ -72,3 +74,36 @@ def test_unsupported_protocol():
 
     with pytest.raises(UnsupportedProtocolError):
         build_client_object(Fake(), **COMMON)  # type: ignore[arg-type]
+
+
+def test_pick_panel_client_secret_prefers_uuid_over_numeric_id():
+    assert pick_panel_client_secret({"uuid": "550e8400-e29b-41d4-a716-446655440000"}) == (
+        "550e8400-e29b-41d4-a716-446655440000"
+    )
+    assert pick_panel_client_secret({"id": "42", "password": "trojan-key"}) == "trojan-key"
+    assert pick_panel_client_secret({"id": "real-uuid-here", "auth": "hy-auth"}) == (
+        "real-uuid-here"
+    )
+
+
+def test_merge_client_record_preserves_secrets():
+    existing = {
+        "id": "vless-uuid",
+        "password": "trojan-pass",
+        "auth": "hysteria-auth",
+        "email": "dimatest",
+        "subId": "test",
+        "expiryTime": 0,
+        "enable": True,
+    }
+    merged = merge_client_record_for_update(
+        existing,
+        email="dimatest",
+        sub_id="test",
+        expiry_ms=1_900_000_000_000,
+    )
+    assert merged["id"] == "vless-uuid"
+    assert merged["password"] == "trojan-pass"
+    assert merged["auth"] == "hysteria-auth"
+    assert merged["expiryTime"] == 1_900_000_000_000
+    assert merged["enable"] is True
