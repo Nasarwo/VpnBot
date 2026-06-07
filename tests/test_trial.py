@@ -4,9 +4,10 @@ from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import User, VpnClient
+from app.db.enums import Protocol
+from app.db.models import Server, ServerInbound, User, VpnClient
 from app.db.repositories import UserRepository, VpnClientRepository
-from app.services import billing
+from app.services import billing, provisioning
 from app.services.panel_updater import MockPanelUpdater
 
 
@@ -79,6 +80,43 @@ async def test_trial_failure_can_be_retried(
     assert retry.applied is True
     refreshed_user = await UserRepository(session).get_by_id(user.id)
     assert refreshed_user.trial_used is True
+
+
+async def test_trial_auto_imports_inbounds_when_servers_added(
+    session: AsyncSession, user: User, monkeypatch
+):
+    """Регресс: сервер добавлен, но inbound'ы не импортированы.
+
+    Ранее триал отвечал «серверы не настроены». Теперь inbound'ы подтягиваются
+    автоматически, и доступ выдаётся."""
+    srv = Server(
+        name="se", country="SE", panel_url="http://p:2053",
+        username="a", password="b", enabled=True,
+    )
+    session.add(srv)
+    await session.commit()
+
+    async def fake_import(sess, server, timeout=15.0):
+        sess.add(
+            ServerInbound(
+                server_id=server.id, inbound_id=1,
+                protocol=Protocol.VLESS, enabled=True,
+            )
+        )
+        await sess.flush()
+        return [(1, "vless", "added")]
+
+    monkeypatch.setattr(provisioning, "import_inbounds", fake_import)
+
+    result = await billing.grant_trial(
+        session, user_id=user.id, updater=MockPanelUpdater(), period_days=2
+    )
+    assert result.applied is True
+
+    refreshed_user = await UserRepository(session).get_by_id(user.id)
+    assert refreshed_user.trial_used is True
+    client = await VpnClientRepository(session).get_for_user(user.id)
+    assert client is not None and client.is_active is True
 
 
 async def test_trial_extends_active_subscription(

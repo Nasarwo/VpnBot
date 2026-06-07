@@ -17,6 +17,13 @@ class PaymentStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class BindRequestStatus(str, enum.Enum):
+    WAITING_ADMIN = "waiting_admin"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    FAILED = "failed"
+
+
 class AttachmentType(str, enum.Enum):
     TEXT = "text"
     PHOTO = "photo"

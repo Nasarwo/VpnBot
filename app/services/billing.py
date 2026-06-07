@@ -108,6 +108,10 @@ async def _extend_and_finalize(
     client_repo = VpnClientRepository(session)
     client = await client_repo.get_for_user(payment.user_id)
     targets = await provisioning.has_targets(session)
+    if client is None and not targets:
+        # Серверы могли быть добавлены без импортированных inbound'ов —
+        # пробуем подтянуть их автоматически, прежде чем считать заявку проваленной.
+        targets = await provisioning.ensure_inbounds_imported(session)
     logger.info(
         "Финализация заявки id=%s user_id=%s period=%s: client=%s targets=%s",
         payment.id,
@@ -174,6 +178,7 @@ async def _extend_and_finalize(
 
     client.expires_at = new_expiry
     client.is_active = True
+    client.expiry_notify_stage = 0
     payment.status = PaymentStatus.APPLIED
     payment.applied_at = now
     payment.last_error = None
@@ -277,6 +282,7 @@ async def manual_extend(
 
     client.expires_at = new_expiry
     client.is_active = True
+    client.expiry_notify_stage = 0
     await audit.record(
         session,
         action="billing.manual_extend",
@@ -346,6 +352,9 @@ async def grant_trial(
     client = await VpnClientRepository(session).get_for_user(user_id)
     targets = await provisioning.has_targets(session)
     if client is None and not targets:
+        # Серверы добавлены, но inbound'ы ещё не импортированы — пробуем импорт.
+        targets = await provisioning.ensure_inbounds_imported(session)
+    if client is None and not targets:
         return TrialResult(applied=False, no_client=True)
     if client is None:
         client = await provisioning.ensure_vpn_client(session, user)
@@ -375,6 +384,7 @@ async def grant_trial(
     user.trial_used = True
     client.expires_at = new_expiry
     client.is_active = True
+    client.expiry_notify_stage = 0
     await audit.record(
         session,
         action="billing.trial_granted",

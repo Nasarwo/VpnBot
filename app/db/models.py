@@ -16,7 +16,13 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
-from app.db.enums import AttachmentType, PaymentStatus, Protocol, UserRole
+from app.db.enums import (
+    AttachmentType,
+    BindRequestStatus,
+    PaymentStatus,
+    Protocol,
+    UserRole,
+)
 
 
 class User(Base, TimestampMixin):
@@ -39,11 +45,18 @@ class User(Base, TimestampMixin):
     trial_used: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, server_default="0"
     )
+    # Пользователь прошёл вопрос «были ли вы клиентом до бота» (да/нет).
+    onboarding_done: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default="0"
+    )
 
     vpn_clients: Mapped[list[VpnClient]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
     payment_requests: Mapped[list[PaymentRequest]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    bind_requests: Mapped[list[BindRequest]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -64,6 +77,12 @@ class VpnClient(Base):
         DateTime(timezone=True), nullable=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Стадия отправленных уведомлений об окончании текущего срока:
+    # 0 — ничего, 1 — «за день», 2 — «за час», 3 — «истекла».
+    # Сбрасывается в 0 при продлении/выдаче нового срока.
+    expiry_notify_stage: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, server_default="0"
+    )
 
     user: Mapped[User] = relationship(back_populates="vpn_clients")
     mappings: Mapped[list[ClientServerMapping]] = relationship(
@@ -87,6 +106,11 @@ class Server(Base):
     # База ссылки-подписки 3x-ui, напр. https://host:2096/sub/ — полный URL = base + public_id
     subscription_base: Mapped[str | None] = mapped_column(String(512), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Результат фоновой проверки доступности панели: None — ещё не проверялся.
+    is_online: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )
@@ -207,6 +231,38 @@ class PaymentAttachment(Base):
     payment_request: Mapped[PaymentRequest] = relationship(
         back_populates="attachments"
     )
+
+
+class BindRequest(Base):
+    """Заявка на привязку существующей подписки (до внедрения бота)."""
+
+    __tablename__ = "bind_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    subscription_link: Mapped[str] = mapped_column(Text, nullable=False)
+    public_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    request_code: Mapped[str] = mapped_column(
+        String(32), unique=True, index=True, nullable=False
+    )
+    status: Mapped[BindRequestStatus] = mapped_column(
+        Enum(BindRequestStatus, native_enum=False, length=16),
+        default=BindRequestStatus.WAITING_ADMIN,
+        index=True,
+        nullable=False,
+    )
+    admin_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    user: Mapped[User] = relationship(back_populates="bind_requests")
 
 
 class IpObservation(Base):

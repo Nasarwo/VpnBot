@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import uuid as uuid_lib
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +41,13 @@ _PROTOCOL_MAP: dict[str, Protocol] = {
 
 def _expiry_to_ms(expiry: datetime) -> int:
     return int(expiry.timestamp() * 1000)
+
+
+def _ms_to_datetime(expiry_ms: int) -> datetime | None:
+    """0/отрицательное значение в 3x-ui означает «без срока» → None."""
+    if not expiry_ms or expiry_ms <= 0:
+        return None
+    return datetime.fromtimestamp(expiry_ms / 1000, tz=UTC)
 
 
 def _new_secret() -> str:
@@ -90,11 +98,11 @@ async def ensure_vpn_client(session: AsyncSession, user: User) -> VpnClient:
 
 
 def _build_spec(
-    public_id: str, secret: str, inbounds: list[ServerInbound]
+    email: str, sub_id: str, secret: str, inbounds: list[ServerInbound]
 ) -> ServerProvision:
     return ServerProvision(
-        email=client_email(public_id),
-        sub_id=public_id,
+        email=email,
+        sub_id=sub_id,
         client_uuid=secret,
         password=secret,
         inbounds=[
@@ -123,17 +131,27 @@ async def apply_access(
     повторный вызов продлевает срок. Возвращает результат по каждому серверу.
     """
     expiry_ms = _expiry_to_ms(expiry)
-    secret = vpn_client.external_client_id or _new_secret()
-    vpn_client.external_client_id = secret
-    email = client_email(public_id)
 
     server_repo = ServerRepository(session)
     mapping_repo = MappingRepository(session)
 
+    existing_mappings = await mapping_repo.list_for_client(vpn_client.id)
+    existing_servers = {m.server_id for m in existing_mappings}
+    # Если у клиента уже есть привязка (в т.ч. импортированный из панели клиент),
+    # переиспользуем её идентичность (email/uuid/subId), чтобы продлевать именно
+    # существующего клиента, а не плодить нового.
+    anchor = existing_mappings[0] if existing_mappings else None
+    if anchor is not None:
+        secret = anchor.client_uuid
+        email = anchor.email
+        sub_id = anchor.sub_id or public_id
+    else:
+        secret = vpn_client.external_client_id or _new_secret()
+        email = client_email(public_id)
+        sub_id = public_id
+    vpn_client.external_client_id = secret
+
     servers = await server_repo.list_enabled_with_inbounds()
-    existing_servers = {
-        m.server_id for m in await mapping_repo.list_for_client(vpn_client.id)
-    }
     logger.info(
         "apply_access: client_id=%s public_id=%s expiry=%s серверов=%s "
         "уже_привязано_серверов=%s",
@@ -159,7 +177,7 @@ async def apply_access(
             )
             continue
         covered_any = True
-        spec = _build_spec(public_id, secret, enabled_inbounds)
+        spec = _build_spec(email, sub_id, secret, enabled_inbounds)
         try:
             await updater.provision_server(server, spec, expiry_ms)
         except PanelUpdateError as exc:
@@ -182,7 +200,7 @@ async def apply_access(
                 protocol=primary.protocol,
                 client_uuid=secret,
                 email=email,
-                sub_id=public_id,
+                sub_id=sub_id,
             )
         results.append(ServerUpdateResult(server_id=server.id, ok=True))
 
@@ -279,6 +297,335 @@ async def import_inbounds(
         summary.append((inbound_id, protocol.value, "added"))
     await session.flush()
     return summary
+
+
+async def ensure_inbounds_imported(
+    session: AsyncSession, timeout: float = 15.0
+) -> bool:
+    """Импортирует inbound'ы для включённых серверов, у которых их ещё нет.
+
+    Нужно для сценария «сервер добавлен, но inbound'ы не импортированы»: тогда
+    провижинг нового клиента (оплата/триал) не находил целей и падал в «серверы
+    не настроены». Здесь мы один раз подтягиваем inbound'ы с панели.
+
+    Возвращает True, если после импорта появилась хотя бы одна цель провижининга.
+    Сетевые ошибки отдельных панелей не прерывают процесс.
+    """
+    repo = ServerRepository(session)
+    servers = await repo.list_enabled_with_inbounds()
+    for server in servers:
+        if any(i.enabled for i in server.inbounds):
+            continue
+        try:
+            summary = await import_inbounds(session, server, timeout)
+            logger.info(
+                "ensure_inbounds_imported: сервер #%s (%s) импорт: %s",
+                server.id,
+                server.name,
+                summary,
+            )
+        except PanelUpdateError as exc:
+            logger.warning(
+                "ensure_inbounds_imported: сервер #%s (%s) импорт не удался: %s",
+                server.id,
+                server.name,
+                exc,
+            )
+    return await repo.has_provision_targets()
+
+
+@dataclass(slots=True)
+class PanelClientInfo:
+    """Нормализованные данные существующего клиента панели."""
+
+    email: str
+    sub_id: str
+    secret: str
+    expiry_ms: int
+    enable: bool
+    inbound_ids: list[int]
+
+
+@dataclass(slots=True)
+class BindResult:
+    public_id: str
+    email: str
+    expires_at: datetime | None
+    inbound_ids: list[int]
+    synced: bool
+    results: list[ServerUpdateResult] = field(default_factory=list)
+
+
+async def list_panel_clients(
+    server: Server, timeout: float = 15.0
+) -> list[dict[str, object]]:
+    """Возвращает список клиентов, уже существующих на панели сервера."""
+    async with XuiClient(
+        base_url=server.panel_url,
+        username=server.username,
+        password=server.password,
+        timeout=timeout,
+    ) as client:
+        try:
+            return await client.list_client_records()
+        except XuiError as exc:
+            raise PanelUpdateError(str(exc)) from exc
+
+
+def _pick_secret(*values: object) -> str:
+    for value in values:
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+async def find_panel_client(
+    server: Server, email: str, timeout: float = 15.0
+) -> PanelClientInfo | None:
+    """Ищет клиента панели по email и нормализует его поля."""
+    async with XuiClient(
+        base_url=server.panel_url,
+        username=server.username,
+        password=server.password,
+        timeout=timeout,
+    ) as client:
+        try:
+            if await client.supports_clients_api():
+                record = await client.get_client_record(email)
+                if record is None:
+                    return None
+                c = record.get("client") if isinstance(record, dict) else None
+                c = c if isinstance(c, dict) else {}
+                inbound_ids = [
+                    int(i)
+                    for i in (record.get("inboundIds") or [])
+                    if isinstance(i, int)
+                ]
+                secret = _pick_secret(
+                    c.get("uuid"), c.get("id"), c.get("password"), c.get("auth")
+                )
+                return PanelClientInfo(
+                    email=str(c.get("email") or email),
+                    sub_id=str(c.get("subId") or ""),
+                    secret=secret,
+                    expiry_ms=int(c.get("expiryTime") or 0),
+                    enable=bool(c.get("enable", True)),
+                    inbound_ids=inbound_ids,
+                )
+            # Старые панели: ищем по settings.clients[] всех inbound'ов.
+            records = await client.list_client_records()
+        except XuiError as exc:
+            raise PanelUpdateError(str(exc)) from exc
+
+    matches = [r for r in records if r.get("email") == email]
+    if not matches:
+        return None
+    inbound_ids = [
+        int(r["_inbound_id"])
+        for r in matches
+        if isinstance(r.get("_inbound_id"), int)
+    ]
+    first = matches[0]
+    secret = _pick_secret(
+        first.get("id"), first.get("password"), first.get("auth")
+    )
+    return PanelClientInfo(
+        email=email,
+        sub_id=str(first.get("subId") or ""),
+        secret=secret,
+        expiry_ms=int(first.get("expiryTime") or 0),
+        enable=bool(first.get("enable", True)),
+        inbound_ids=inbound_ids,
+    )
+
+
+async def _public_id_taken(
+    session: AsyncSession, public_id: str, exclude_user_id: int
+) -> bool:
+    result = await session.execute(
+        select(User.id).where(
+            User.public_id == public_id, User.id != exclude_user_id
+        )
+    )
+    return result.first() is not None
+
+
+async def bind_existing_client(
+    session: AsyncSession,
+    server: Server,
+    email: str,
+    user: User,
+    updater: PanelUpdater,
+    timeout: float = 15.0,
+) -> BindResult:
+    """Привязывает существующего клиента панели к пользователю бота.
+
+    Сохраняет UUID/secret, subId и срок действия клиента, чтобы дальнейшие
+    продления шли по уже существующему клиенту, а не создавали нового.
+    """
+    info = await find_panel_client(server, email, timeout)
+    if info is None:
+        raise PanelUpdateError(
+            f"Клиент {email} не найден на панели сервера #{server.id}"
+        )
+    secret = info.secret or _new_secret()
+
+    # Идентичность подписки: если у клиента есть subId — принимаем его как
+    # public_id пользователя (чтобы ссылка-подписка совпадала). Иначе используем
+    # текущий public_id и проставим его клиенту как subId при синхронизации.
+    if info.sub_id:
+        if await _public_id_taken(session, info.sub_id, user.id):
+            raise PanelUpdateError(
+                f"subId {info.sub_id} уже привязан к другому пользователю"
+            )
+        user.public_id = info.sub_id
+        sub_id = info.sub_id
+    else:
+        sub_id = user.public_id or info.email
+    await session.flush()
+
+    expires_at = _ms_to_datetime(info.expiry_ms)
+
+    client = await VpnClientRepository(session).get_for_user(user.id)
+    if client is None:
+        client = VpnClient(
+            user_id=user.id,
+            display_name=user.username or user.first_name,
+            email=info.email,
+            external_client_id=secret,
+            expires_at=expires_at,
+            is_active=info.enable and (expires_at is None or expires_at > datetime.now(tz=UTC)),
+        )
+        session.add(client)
+        await session.flush()
+    else:
+        client.email = info.email
+        client.external_client_id = secret
+        client.expires_at = expires_at
+        client.is_active = info.enable and (
+            expires_at is None or expires_at > datetime.now(tz=UTC)
+        )
+        await session.flush()
+
+    mapping_repo = MappingRepository(session)
+    existing_servers = {
+        m.server_id
+        for m in await mapping_repo.list_for_client(client.id)
+    }
+    if server.id not in existing_servers:
+        primary_inbound = info.inbound_ids[0] if info.inbound_ids else 0
+        configured = await ServerRepository(session).get_inbound(
+            server.id, primary_inbound
+        )
+        protocol = configured.protocol if configured else Protocol.VLESS
+        await mapping_repo.create(
+            vpn_client_id=client.id,
+            server_id=server.id,
+            inbound_id=primary_inbound,
+            protocol=protocol,
+            client_uuid=secret,
+            email=info.email,
+            sub_id=sub_id,
+        )
+
+    logger.info(
+        "bind_existing_client: user=%s public_id=%s email=%s server=%s "
+        "secret=%s expiry=%s inbounds=%s",
+        user.id,
+        user.public_id,
+        info.email,
+        server.id,
+        "есть" if info.secret else "сгенерирован",
+        expires_at.isoformat() if expires_at else "без срока",
+        info.inbound_ids,
+    )
+
+    # Синхронизируем идентичность и subId по всем серверам, не меняя срок.
+    # Для «бессрочных» клиентов (expiry=0) синхронизацию пропускаем, чтобы не
+    # выставить им конечный срок.
+    results: list[ServerUpdateResult] = []
+    synced = False
+    if expires_at is not None:
+        results = await apply_access(
+            session, client, user.public_id or sub_id, expires_at, updater
+        )
+        synced = True
+
+    return BindResult(
+        public_id=user.public_id or sub_id,
+        email=info.email,
+        expires_at=expires_at,
+        inbound_ids=info.inbound_ids,
+        synced=synced,
+        results=results,
+    )
+
+
+async def bind_user_by_public_id(
+    session: AsyncSession,
+    user: User,
+    public_id: str,
+    updater: PanelUpdater,
+    timeout: float = 15.0,
+) -> BindResult:
+    """Привязывает пользователя по ID из ссылки-подписки.
+
+    Ищет клиента с email или subId = public_id на любом включённом сервере,
+    затем синхронизирует доступ по всем серверам.
+    """
+    if await _public_id_taken(session, public_id, user.id):
+        raise PanelUpdateError(
+            f"ID {public_id} уже привязан к другому пользователю бота"
+        )
+
+    user.public_id = public_id
+    await session.flush()
+
+    servers = await ServerRepository(session).list_enabled()
+    last_error: str | None = None
+    for server in servers:
+        info = await find_panel_client(server, public_id, timeout)
+        if info is None:
+            info = await _find_panel_client_by_sub_id(server, public_id, timeout)
+        if info is None:
+            continue
+        email = info.email or public_id
+        try:
+            result = await bind_existing_client(
+                session, server, email, user, updater, timeout
+            )
+        except PanelUpdateError as exc:
+            last_error = str(exc)
+            continue
+        # ID из ссылки — источник истины для public_id пользователя.
+        user.public_id = public_id
+        await session.flush()
+        return result
+
+    if last_error:
+        raise PanelUpdateError(last_error)
+    raise PanelUpdateError(
+        f"Клиент с ID {public_id} не найден ни на одном настроенном сервере"
+    )
+
+
+async def _find_panel_client_by_sub_id(
+    server: Server, sub_id: str, timeout: float = 15.0
+) -> PanelClientInfo | None:
+    """Ищет клиента панели по subId (если email не совпадает с public_id)."""
+    try:
+        records = await list_panel_clients(server, timeout)
+    except PanelUpdateError:
+        return None
+    for record in records:
+        client = record.get("client") if isinstance(record.get("client"), dict) else record
+        if not isinstance(client, dict):
+            continue
+        if str(client.get("subId") or "") != sub_id:
+            continue
+        email = str(client.get("email") or sub_id)
+        return await find_panel_client(server, email, timeout)
+    return None
 
 
 async def provision_for_user(

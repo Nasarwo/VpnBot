@@ -7,9 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.enums import AttachmentType, PaymentStatus, Protocol, UserRole
+from app.db.enums import AttachmentType, BindRequestStatus, PaymentStatus, Protocol, UserRole
 from app.db.models import (
     AuditLog,
+    BindRequest,
     ClientServerMapping,
     PaymentAttachment,
     PaymentRequest,
@@ -36,6 +37,19 @@ class UserRepository:
 
     async def get_by_id(self, user_id: int) -> User | None:
         return await self.session.get(User, user_id)
+
+    async def all_telegram_ids(self) -> list[int]:
+        """Telegram ID всех пользователей, когда-либо запускавших бота."""
+        result = await self.session.execute(
+            select(User.telegram_id).order_by(User.id.asc())
+        )
+        return [int(tid) for tid in result.scalars().all() if tid is not None]
+
+    async def count(self) -> int:
+        from sqlalchemy import func
+
+        result = await self.session.execute(select(func.count(User.id)))
+        return int(result.scalar_one())
 
     async def _generate_public_id(self) -> str:
         """Генерирует короткий уникальный публичный ID пользователя."""
@@ -121,6 +135,27 @@ class VpnClientRepository:
         )
         return list(result.scalars().all())
 
+    async def list_for_expiry_notifications(
+        self, now: datetime, horizon_hours: int = 24
+    ) -> list[VpnClient]:
+        """Клиенты, которым пора слать уведомление об окончании.
+
+        Берём тех, у кого задан срок, ещё не пройдена финальная стадия
+        уведомлений (stage < 3) и срок наступает не позже горизонта (по умолчанию
+        24 ч) — включая уже истёкшие.
+        """
+        from datetime import timedelta
+
+        deadline = now + timedelta(hours=horizon_hours)
+        result = await self.session.execute(
+            select(VpnClient)
+            .where(VpnClient.expires_at.is_not(None))
+            .where(VpnClient.expires_at <= deadline)
+            .where(VpnClient.expiry_notify_stage < 3)
+            .options(selectinload(VpnClient.user))
+        )
+        return list(result.scalars().all())
+
 
 class ServerRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -128,6 +163,40 @@ class ServerRepository:
 
     async def get_by_id(self, server_id: int) -> Server | None:
         return await self.session.get(Server, server_id)
+
+    async def get_with_inbounds(self, server_id: int) -> Server | None:
+        result = await self.session.execute(
+            select(Server)
+            .where(Server.id == server_id)
+            .options(selectinload(Server.inbounds))
+        )
+        return result.scalar_one_or_none()
+
+    async def add(self, server: Server) -> Server:
+        self.session.add(server)
+        await self.session.flush()
+        return server
+
+    async def delete(self, server_id: int) -> bool:
+        """Удаляет сервер вместе с inbound'ами и привязками (каскад).
+
+        Коллекции грузим заранее: cascade='all, delete-orphan' в async-сессии
+        требует, чтобы связанные объекты были загружены до flush.
+        """
+        result = await self.session.execute(
+            select(Server)
+            .where(Server.id == server_id)
+            .options(
+                selectinload(Server.inbounds),
+                selectinload(Server.mappings),
+            )
+        )
+        server = result.scalar_one_or_none()
+        if server is None:
+            return False
+        await self.session.delete(server)
+        await self.session.flush()
+        return True
 
     async def list_enabled(self) -> list[Server]:
         result = await self.session.execute(
@@ -186,6 +255,15 @@ class ServerRepository:
         for row in rows:
             await self.session.delete(row)
         return len(rows)
+
+    async def set_status(self, server_id: int, online: bool) -> None:
+        """Сохраняет результат фоновой проверки доступности сервера."""
+        server = await self.session.get(Server, server_id)
+        if server is None:
+            return
+        server.is_online = online
+        server.last_checked_at = _utcnow()
+        await self.session.flush()
 
     async def has_provision_targets(self) -> bool:
         result = await self.session.execute(
@@ -311,6 +389,11 @@ class PaymentRepository:
         result = await self.session.execute(select(func.count(PaymentRequest.id)))
         return int(result.scalar_one())
 
+    async def delete(self, payment: PaymentRequest) -> None:
+        """Удаляет заявку (вместе с вложениями по каскаду)."""
+        await self.session.delete(payment)
+        await self.session.flush()
+
     async def latest_open_for_user(self, user_id: int) -> PaymentRequest | None:
         result = await self.session.execute(
             select(PaymentRequest)
@@ -318,6 +401,25 @@ class PaymentRepository:
             .where(
                 PaymentRequest.status.in_(
                     [PaymentStatus.CREATED, PaymentStatus.WAITING_ADMIN]
+                )
+            )
+            .order_by(PaymentRequest.id.desc())
+        )
+        return result.scalars().first()
+
+    async def last_successful_for_user(self, user_id: int) -> PaymentRequest | None:
+        """Последняя успешная (применённая/подтверждённая) оплата пользователя.
+
+        Используется, чтобы (1) понять, оформлял ли пользователь подписку хоть раз
+        (тогда пробный больше не предлагаем) и (2) подсказать прошлый тариф при
+        продлении.
+        """
+        result = await self.session.execute(
+            select(PaymentRequest)
+            .where(PaymentRequest.user_id == user_id)
+            .where(
+                PaymentRequest.status.in_(
+                    [PaymentStatus.APPLIED, PaymentStatus.CONFIRMED]
                 )
             )
             .order_by(PaymentRequest.id.desc())
@@ -348,6 +450,76 @@ class PaymentRepository:
         self.session.add(attachment)
         await self.session.flush()
         return attachment
+
+
+BIND_CODE_BASE = 2001
+
+
+class BindRequestRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def get_by_id(self, request_id: int) -> BindRequest | None:
+        return await self.session.get(BindRequest, request_id)
+
+    async def get_by_id_with_user(self, request_id: int) -> BindRequest | None:
+        result = await self.session.execute(
+            select(BindRequest)
+            .where(BindRequest.id == request_id)
+            .options(selectinload(BindRequest.user))
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_code(self, code: str) -> BindRequest | None:
+        result = await self.session.execute(
+            select(BindRequest)
+            .where(BindRequest.request_code == code)
+            .options(selectinload(BindRequest.user))
+        )
+        return result.scalar_one_or_none()
+
+    async def latest_waiting_for_user(self, user_id: int) -> BindRequest | None:
+        result = await self.session.execute(
+            select(BindRequest)
+            .where(BindRequest.user_id == user_id)
+            .where(BindRequest.status == BindRequestStatus.WAITING_ADMIN)
+            .order_by(BindRequest.id.desc())
+        )
+        return result.scalars().first()
+
+    async def list_waiting_admin(self) -> list[BindRequest]:
+        result = await self.session.execute(
+            select(BindRequest)
+            .where(BindRequest.status == BindRequestStatus.WAITING_ADMIN)
+            .order_by(BindRequest.id.asc())
+            .options(selectinload(BindRequest.user))
+        )
+        return list(result.scalars().all())
+
+    async def count(self) -> int:
+        from sqlalchemy import func
+
+        result = await self.session.execute(select(func.count(BindRequest.id)))
+        return int(result.scalar_one())
+
+    async def create(
+        self,
+        user_id: int,
+        subscription_link: str,
+        public_id: str,
+    ) -> BindRequest:
+        seq = await self.count()
+        request_code = f"BIND-{BIND_CODE_BASE + seq}"
+        req = BindRequest(
+            user_id=user_id,
+            subscription_link=subscription_link,
+            public_id=public_id,
+            request_code=request_code,
+            status=BindRequestStatus.WAITING_ADMIN,
+        )
+        self.session.add(req)
+        await self.session.flush()
+        return req
 
 
 class AuditRepository:

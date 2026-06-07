@@ -36,6 +36,7 @@ async def user(session: AsyncSession) -> User:
         username="testuser",
         first_name="Test",
         role=UserRole.USER,
+        onboarding_done=True,
     )
     session.add(u)
     await session.commit()
@@ -49,6 +50,7 @@ async def admin(session: AsyncSession) -> User:
         username="admin",
         first_name="Admin",
         role=UserRole.ADMIN,
+        onboarding_done=True,
     )
     session.add(u)
     await session.commit()

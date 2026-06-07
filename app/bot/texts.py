@@ -1,16 +1,31 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from html import escape
 
+from app.bot import emoji
 from app.db.enums import PaymentStatus
-from app.db.models import PaymentRequest, User, VpnClient
+from app.db.models import PaymentRequest, Server, User, VpnClient
 
-# Кнопки пользовательского меню
-BTN_MY_ACCESS = "Мой доступ"
-BTN_EXTEND = "Продлить"
-BTN_TRIAL = "Пробные 2 дня"
-BTN_MY_LINKS = "Мои ссылки"
+# Кнопки пользовательского меню (inline)
+BTN_MY_SUBSCRIPTION = "Моя подписка"
+BTN_BUY = "Оформить подписку"
 BTN_SUPPORT = "Поддержка"
+BTN_EXTEND = "Продлить"
+BTN_CONNECT = "Подключение"
+BTN_TRIAL = "3 дня — Пробный доступ"
+BTN_BACK = "Назад"
+BTN_CANCEL = "Отмена"
+BTN_ONBOARD_YES = "Да, была подписка"
+BTN_ONBOARD_NO = "Нет, я новый пользователь"
+
+# Дословный текст акции «приведи друга» (используется при продлении и оформлении).
+REFERRAL_PROMO = (
+    "Также действуют акция приведи друга и получи месяц бесплатно, то есть "
+    "если вы приведете одного человека и он оформит подписку, то получаете "
+    "месяц бесплатно. Повторять можно сколько угодно. За получением обращаться "
+    "в поддержку."
+)
 
 STATUS_LABELS: dict[PaymentStatus, str] = {
     PaymentStatus.CREATED: "создана",
@@ -31,44 +46,206 @@ def _fmt_date(value: datetime | None) -> str:
 
 
 def welcome(user: User) -> str:
-    name = user.first_name or "пользователь"
+    """Приветствие. Использует HTML-разметку: ID завёрнут в <code> —
+    Telegram копирует его в буфер по нажатию. Отправлять с parse_mode='HTML'."""
+    name = escape(user.first_name or "пользователь")
+    public_id = escape(user.public_id or "—")
     return (
         f"Здравствуйте, {name}.\n\n"
         "Это бот управления вашей подпиской на личный доступ.\n"
-        f"Ваш ID: {user.public_id or '—'}\n"
+        f"Ваш ID: <code>{public_id}</code>\n"
         "Сообщите этот ID при обращении в поддержку.\n\n"
-        "Выберите действие в меню ниже."
+        "Выберите действие в меню."
     )
 
 
-def access_status(client: VpnClient | None, public_id: str | None = None) -> str:
-    prefix = f"Ваш ID: {public_id}\n\n" if public_id else ""
-    if client is None or client.expires_at is None:
-        return prefix + (
-            "Срок доступа: не активирован.\n\n"
-            "Нажмите «Продлить», чтобы оформить подписку."
+def onboarding_legacy_question() -> str:
+    return (
+        "Вы пользовались услугами сервиса до внедрения бота?\n\n"
+        "Если у вас уже была подписка — выберите «Да», и мы привяжем "
+        "существующий доступ к этому аккаунту Telegram."
+    )
+
+
+def onboarding_send_link_prompt(example_link: str) -> str:
+    example = escape(example_link)
+    return (
+        "Отправьте свою ссылку на подписку (одну любую). "
+        "Администратор проверит подлинность владельца и привяжет ваш аккаунт.\n\n"
+        f"Пример: <code>{example}</code>"
+    )
+
+
+def onboarding_invalid_link(example_link: str) -> str:
+    example = escape(example_link)
+    return (
+        "Не удалось найти ID подписки в вашем сообщении.\n\n"
+        "Пришлите полную ссылку-подписку или только ID из конца ссылки "
+        "(как в примере ниже).\n\n"
+        f"Пример: <code>{example}</code>"
+    )
+
+
+def bind_request_received(request_code: str) -> str:
+    return (
+        f"Заявка <code>{escape(request_code)}</code> отправлена администратору.\n\n"
+        "После проверки ссылки вы получите доступ с вашим прежним ID подписки. "
+        "Обычно это занимает немного времени."
+    )
+
+
+def bind_request_waiting(request_code: str) -> str:
+    return (
+        f"Заявка <code>{escape(request_code)}</code> на привязку ожидает проверки "
+        "администратором.\n\n"
+        "Как только доступ будет подтверждён, вы получите уведомление."
+    )
+
+
+def bind_request_rejected(request_code: str) -> str:
+    return (
+        f"Заявка <code>{escape(request_code)}</code> отклонена.\n\n"
+        "Если вы уверены, что ссылка верная — обратитесь в поддержку."
+    )
+
+
+def bind_request_approved(public_id: str) -> str:
+    pid = escape(public_id)
+    return (
+        f"{emoji.tg('ok')} Аккаунт привязан.\n\n"
+        f"Ваш ID подписки: <code>{pid}</code>\n"
+        "Доступ восстановлен — откройте «Моя подписка» в меню."
+    )
+
+
+def admin_bind_card(req, user: User) -> str:
+    username = f"@{escape(user.username)}" if user.username else "—"
+    pid = f"<code>{escape(req.public_id)}</code>"
+    link = escape(req.subscription_link)
+    return (
+        f"Привязка подписки <code>{escape(req.request_code)}</code>\n\n"
+        f"Пользователь: {username}\n"
+        f"Telegram ID: {user.telegram_id}\n"
+        f"Имя: {escape(user.first_name or '—')}\n"
+        f"ID из ссылки: {pid}\n"
+        f"Ссылка:\n<code>{link}</code>"
+    )
+
+
+def admin_bind_pending(requests: list) -> str:
+    if not requests:
+        return "Заявок на привязку в ожидании нет."
+    lines = ["Заявки на привязку подписки:\n"]
+    for req in requests:
+        user = req.user
+        username = f"@{escape(user.username)}" if user and user.username else "—"
+        lines.append(
+            f"<code>{escape(req.request_code)}</code> — {username} — "
+            f"ID <code>{escape(req.public_id)}</code>"
         )
-    expires = client.expires_at
+    lines.append("\nПодтвердить: кнопка в карточке или /confirmbind КОД")
+    return "\n".join(lines)
+
+
+def country_flag(country: str | None) -> str:
+    """Эмодзи-флаг по ISO2-коду страны (напр. 'SE' -> 🇸🇪). Иначе пусто."""
+    if not country:
+        return ""
+    code = country.strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return ""
+    return "".join(chr(0x1F1E6 + (ord(ch) - ord("A"))) for ch in code)
+
+
+def server_button_label(server: Server) -> str:
+    # Флаг не добавляем автоматически: его указывают прямо в названии сервера,
+    # иначе он дублируется.
+    return server.name
+
+
+def _days_left(expires: datetime | None) -> int | None:
+    if expires is None:
+        return None
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=UTC)
-    now = datetime.now(tz=UTC)
-    if expires > now:
-        days_left = (expires - now).days
-        return prefix + (
-            f"Срок доступа активен до: {_fmt_date(expires)}\n"
-            f"Осталось дней: {days_left}"
-        )
-    return prefix + (
-        f"Срок доступа истёк: {_fmt_date(expires)}\n\n"
-        "Нажмите «Продлить», чтобы возобновить доступ."
-    )
+    delta = expires - datetime.now(tz=UTC)
+    if delta.total_seconds() <= 0:
+        return 0
+    return delta.days
 
 
-def choose_plan() -> str:
-    return (
-        "Выберите тариф продления подписки:\n\n"
-        "Чем длиннее срок, тем выгоднее месяц доступа."
-    )
+def subscription_overview(client: VpnClient | None, public_id: str | None) -> str:
+    """Экран «Моя подписка»: дни и ID. Отправлять с parse_mode='HTML'."""
+    pid = escape(public_id or "—")
+    days = _days_left(client.expires_at if client else None)
+    header = f"{emoji.tg('subscription')} <b>Ваша подписка активна</b>"
+    lines = [
+        header,
+        "",
+        f"ID подписки: <code>{pid}</code>",
+        f"Осталось дней: {days if days is not None else '—'}",
+    ]
+    if client and client.expires_at is not None:
+        lines.append(f"Действует до: {_fmt_date(client.expires_at)}")
+    lines.append("")
+    lines.append("Выберите действие:")
+    return "\n".join(lines)
+
+
+def extend_info(last_plan_title: str | None) -> str:
+    """Экран «Продлить»: прошлый тариф + промо. parse_mode='HTML'."""
+    lines = [f"{emoji.tg('extend')} <b>Продление подписки</b>", ""]
+    if last_plan_title:
+        lines.append(f"Ваш прошлый тариф: <b>{escape(last_plan_title)}</b>.")
+        lines.append("")
+    lines.append(f"<i>{escape(REFERRAL_PROMO)}</i>")
+    lines.append("")
+    lines.append("Выберите тариф для продления:")
+    return "\n".join(lines)
+
+
+def purchase_info(show_trial: bool) -> str:
+    """Экран «Оформить подписку»: цены и правила. parse_mode='HTML'."""
+    lines = [
+        f"{emoji.tg('buy')} <b>Оформление подписки</b>",
+        "",
+        "При покупке вы получаете доступ к высокоскоростным серверам на все "
+        "ваши устройства, трафик не ограничен.",
+        "",
+        "Тарифы:",
+        "Месячный - 175 рублей",
+        "Полугодовой - 850 рублей (на 200 рублей дороже если платить ежемесячно)",
+        "Годовой - 1600 рублей (на 500 рублей дороже если платить ежемесячно)",
+    ]
+    if show_trial:
+        lines.append("")
+        lines.append("Доступен бесплатный пробный доступ на 3 дня.")
+    lines.append("")
+    lines.append(f"<i>{escape(REFERRAL_PROMO)}</i>")
+    lines.append("")
+    lines.append("Выберите тариф:")
+    return "\n".join(lines)
+
+
+def connection_overview(servers: list[Server]) -> str:
+    """Экран «Подключение»: доступность серверов. parse_mode='HTML'."""
+    lines = [f"{emoji.tg('connect')} <b>Подключение</b>", "", "Доступность серверов:"]
+    visible = [s for s in servers if s.subscription_base]
+    if not visible:
+        lines.append("")
+        lines.append("Серверы пока не настроены. Обратитесь в поддержку.")
+        return "\n".join(lines)
+    for server in visible:
+        if server.is_online is True:
+            status = emoji.tg("ok")
+        elif server.is_online is False:
+            status = emoji.tg("down")
+        else:
+            status = emoji.tg("unknown")
+        lines.append(f"{escape(server_button_label(server))} — {status}")
+    lines.append("")
+    lines.append("Нажмите на сервер ниже, чтобы скопировать ссылку-подписку.")
+    return "\n".join(lines)
 
 
 def period_label(period_days: int) -> str:
@@ -85,7 +262,7 @@ def payment_created(
 ) -> str:
     amount = int(payment.amount) if payment.amount == int(payment.amount) else payment.amount
     return (
-        f"Заявка {payment.payment_code} создана.\n\n"
+        f"Заявка <code>{escape(payment.payment_code)}</code> создана.\n\n"
         f"Сумма: {amount} ₽\n"
         f"Срок: {period_label(payment.period_days)}\n\n"
         "Переведите оплату по реквизитам:\n"
@@ -96,7 +273,7 @@ def payment_created(
 
 def proof_received(payment_code: str) -> str:
     return (
-        f"Подтверждение по заявке {payment_code} получено.\n"
+        f"Подтверждение по заявке <code>{escape(payment_code)}</code> получено.\n"
         "Администратор проверит оплату и продлит доступ. Мы пришлём уведомление."
     )
 
@@ -104,72 +281,87 @@ def proof_received(payment_code: str) -> str:
 def no_open_request() -> str:
     return (
         "Активной заявки нет.\n"
-        "Нажмите «Продлить», чтобы создать заявку на продление."
+        "Откройте меню и выберите тариф, чтобы создать заявку."
     )
-
-
-def links_message(links: list[tuple[str, str]]) -> str:
-    if not links:
-        return (
-            "Ссылки подключения пока недоступны.\n"
-            "Они появятся после активации или продления доступа."
-        )
-    lines = ["Ваши ссылки подключения:\n"]
-    for label, url in links:
-        lines.append(f"{label}:\n{url}\n")
-    return "\n".join(lines)
 
 
 def trial_granted(client: VpnClient, period_days: int) -> str:
     return (
-        f"Пробный доступ на {period_days} дня активирован.\n"
+        f"{emoji.tg('ok')} Пробный доступ на {period_days} дня активирован.\n"
         f"Срок действия до: {_fmt_date(client.expires_at)}\n\n"
-        "Ссылки подключения доступны по кнопке «Мои ссылки»."
+        "Ссылки для подключения — в разделе «Моя подписка» → «Подключение»."
     )
 
 
 def trial_already_used() -> str:
     return (
         "Пробный период уже был использован на этом аккаунте.\n"
-        "Оформить полный доступ можно по кнопке «Продлить»."
+        "Оформить полный доступ можно в меню."
     )
 
 
 def trial_no_client() -> str:
     return (
-        "Для активации пробного периода обратитесь в поддержку: "
-        "ваш профиль ещё не подключён."
+        "Пробный доступ пока недоступен: серверы ещё не настроены.\n"
+        "Попробуйте чуть позже."
     )
 
 
 def trial_failed() -> str:
     return (
-        "Не удалось активировать пробный период из-за временной ошибки.\n"
-        "Попробуйте ещё раз позже или обратитесь в поддержку."
+        "Не удалось активировать пробный доступ из-за временной ошибки.\n"
+        "Попробуйте ещё раз позже."
     )
 
 
 def support_message(contact: str, public_id: str | None = None) -> str:
-    id_line = f"Ваш ID: {public_id}\n" if public_id else ""
+    id_line = f"Ваш ID: <code>{public_id}</code>\n" if public_id else ""
     return (
-        "Поддержка.\n\n"
         f"{id_line}"
         f"По вопросам подключения и оплаты обращайтесь: {contact}\n"
-        "Укажите свой ID — так мы быстрее вас найдём."
+        "Укажите свой ID — так время ожидания ответа кратно уменьшится ;)."
     )
 
 
 def access_extended(client: VpnClient) -> str:
     return (
-        "Доступ продлён.\n"
+        f"{emoji.tg('ok')} Доступ продлён.\n"
         f"Новый срок действия: {_fmt_date(client.expires_at)}\n\n"
-        "Актуальные ссылки доступны по кнопке «Мои ссылки»."
+        "Актуальные ссылки — в разделе «Моя подписка» → «Подключение»."
+    )
+
+
+def expiry_notice(stage: int, expires_at: datetime | None) -> str:
+    """Уведомление об окончании подписки. parse_mode='HTML'.
+
+    stage: 1 — за день, 2 — за час, 3 — подписка истекла.
+    """
+    until = _fmt_date(expires_at)
+    if stage == 1:
+        return (
+            f"{emoji.tg('extend')} <b>Подписка истекает через 1 день</b>\n"
+            f"Действует до: {until}\n\n"
+            "Продлите доступ заранее, чтобы не потерять подключение: "
+            "«Моя подписка» → «Продлить»."
+        )
+    if stage == 2:
+        return (
+            f"{emoji.tg('extend')} <b>Подписка истекает через час</b>\n"
+            f"Действует до: {until}\n\n"
+            "Продлите доступ, чтобы не прерывать подключение: "
+            "«Моя подписка» → «Продлить»."
+        )
+    return (
+        f"{emoji.tg('cancel')} <b>Подписка закончилась</b>\n"
+        f"Срок действия истёк: {until}\n\n"
+        "Доступ приостановлен. Оформите продление, чтобы снова подключиться: "
+        "«Оформить подписку»."
     )
 
 
 def payment_rejected(payment_code: str) -> str:
     return (
-        f"Заявка {payment_code} отклонена.\n"
+        f"Заявка <code>{escape(payment_code)}</code> отклонена.\n"
         "Если это ошибка, свяжитесь с поддержкой."
     )
 
@@ -178,20 +370,21 @@ def payment_rejected(payment_code: str) -> str:
 
 
 def admin_payment_card(payment: PaymentRequest, user: User) -> str:
-    username = f"@{user.username}" if user.username else "—"
+    username = f"@{escape(user.username)}" if user.username else "—"
     amount = int(payment.amount) if payment.amount == int(payment.amount) else payment.amount
-    status = STATUS_LABELS.get(payment.status, payment.status.value)
+    status = escape(STATUS_LABELS.get(payment.status, payment.status.value))
+    pid = f"<code>{escape(user.public_id)}</code>" if user.public_id else "—"
     text = (
-        f"Новая заявка {payment.payment_code}\n\n"
+        f"Новая заявка <code>{escape(payment.payment_code)}</code>\n\n"
         f"Пользователь: {username}\n"
-        f"ID: {user.public_id or '—'}\n"
+        f"ID: {pid}\n"
         f"Telegram ID: {user.telegram_id}\n"
         f"Сумма: {amount} ₽\n"
         f"Срок: +{payment.period_days} дней\n"
         f"Статус: {status}"
     )
     if payment.last_error:
-        text += f"\n\nОшибка: {payment.last_error}"
+        text += f"\n\nОшибка: {escape(payment.last_error)}"
     return text
 
 
@@ -218,9 +411,10 @@ def admin_history(payments: list[PaymentRequest]) -> str:
         return "История оплат пуста."
     lines = ["История оплат:\n"]
     for p in payments:
-        status = STATUS_LABELS.get(p.status, p.status.value)
+        status = escape(STATUS_LABELS.get(p.status, p.status.value))
         lines.append(
-            f"{p.payment_code} — {int(p.amount)} ₽ — {status} — {_fmt_date(p.created_at)}"
+            f"<code>{escape(p.payment_code)}</code> — {int(p.amount)} ₽ — "
+            f"{status} — {_fmt_date(p.created_at)}"
         )
     return "\n".join(lines)
 
@@ -231,12 +425,13 @@ def admin_pending(payments: list[PaymentRequest]) -> str:
     lines = ["Заявки в ожидании проверки:\n"]
     for p in payments:
         user = p.user
-        username = f"@{user.username}" if user and user.username else "—"
+        username = f"@{escape(user.username)}" if user and user.username else "—"
         amount = int(p.amount) if p.amount == int(p.amount) else p.amount
         lines.append(
-            f"{p.payment_code} — {username} — {amount} ₽ — +{p.period_days} дн."
+            f"<code>{escape(p.payment_code)}</code> — {username} — "
+            f"{amount} ₽ — +{p.period_days} дн."
         )
-    lines.append("\nПодтвердить: /confirm <код>\nОтклонить: /reject <код>")
+    lines.append("\nПодтвердить: /confirm КОД\nОтклонить: /reject КОД")
     return "\n".join(lines)
 
 
@@ -325,6 +520,185 @@ def admin_servers(servers: list) -> str:
         "\nУдалить лишний inbound: /delinbound <server_id> <inbound_id>"
     )
     lines.append("Удалить все inbound'ы сервера: /clearinbounds <server_id>")
+    return "\n".join(lines)
+
+
+def _server_status_mark(server) -> str:
+    if server.is_online is True:
+        return "🟢"
+    if server.is_online is False:
+        return "🔴"
+    return "⚪"
+
+
+def admin_panel_home(servers: list) -> str:
+    total = len(servers)
+    online = sum(1 for s in servers if s.is_online is True)
+    enabled = sum(1 for s in servers if s.enabled)
+    lines = [
+        "Панель администратора",
+        "",
+        f"Серверов: {total} (включено: {enabled}, онлайн: {online})",
+        "Выберите раздел.",
+    ]
+    return "\n".join(lines)
+
+
+def admin_servers_title(servers: list) -> str:
+    if not servers:
+        return (
+            "Серверы не настроены.\n\n"
+            "Нажмите «Добавить сервер», чтобы подключить первую панель 3x-ui."
+        )
+    return (
+        "Серверы. Нажмите на сервер, чтобы открыть управление.\n"
+        "🟢 онлайн · 🔴 офлайн · ⚪ не проверялся"
+    )
+
+
+def admin_server_detail(server) -> str:
+    inbounds = list(getattr(server, "inbounds", []))
+    enabled_inbounds = sum(1 for i in inbounds if i.enabled)
+    last = (
+        server.last_checked_at.strftime("%d.%m %H:%M UTC")
+        if server.last_checked_at
+        else "—"
+    )
+    if server.is_online is True:
+        online = "онлайн 🟢"
+    elif server.is_online is False:
+        online = "офлайн 🔴"
+    else:
+        online = "не проверялся ⚪"
+    lines = [
+        f"{_server_status_mark(server)} Сервер #{server.id} — {server.name}".strip(),
+        "",
+        f"Состояние: {'включён' if server.enabled else 'выключен'}",
+        f"Доступность: {online} (проверка: {last})",
+        f"Тип: {server.kind}",
+        f"Страна: {server.country or '—'}",
+        f"Панель: {server.panel_url}",
+        f"Подписка: {server.subscription_base or '—'}",
+        f"Inbound'ы: {len(inbounds)} (активных: {enabled_inbounds})",
+    ]
+    for inb in inbounds:
+        flow = f", flow={inb.flow}" if inb.flow else ""
+        on = "" if inb.enabled else " (выкл)"
+        lines.append(f"   • inbound {inb.inbound_id}: {inb.protocol.value}{flow}{on}")
+    return "\n".join(lines)
+
+
+def admin_add_server_prompt() -> str:
+    return (
+        "Добавление сервера.\n\n"
+        "Пришлите одной строкой поля через «|»:\n"
+        "name|country|panel_url|username|password|[kind]|[subscription_base]\n\n"
+        "Пример:\n"
+        "Германия|DE|https://de.example.com:2053/panel|admin|pass|direct|"
+        "https://de.example.com:2096/sub/\n\n"
+        "country — ISO2-код страны (DE, SE, FI…), для флажка и подписи.\n"
+        "kind и subscription_base необязательны.\n\n"
+        "Отправьте /cancel, чтобы отменить."
+    )
+
+
+def admin_server_added(server) -> str:
+    return (
+        f"Сервер добавлен: #{server.id} {server.name}.\n"
+        "Теперь импортируйте inbound'ы кнопкой «Импорт inbound'ов» в карточке сервера."
+    )
+
+
+def admin_confirm_delete(server) -> str:
+    return (
+        f"Удалить сервер #{server.id} {server.name}?\n\n"
+        "Будут удалены его inbound'ы и привязки клиентов в боте. "
+        "На самой панели 3x-ui клиенты останутся. Действие необратимо."
+    )
+
+
+def admin_server_deleted(server_id: int, name: str) -> str:
+    return f"Сервер #{server_id} {name} удалён из бота."
+
+
+def admin_add_cancelled() -> str:
+    return "Добавление сервера отменено."
+
+
+def admin_broadcast_prompt(user_count: int) -> str:
+    return (
+        "Рассылка сообщения всем пользователям.\n\n"
+        f"Получателей: {user_count}.\n"
+        "Пришлите текст сообщения — он будет отправлен всем, кто запускал бота.\n\n"
+        "Отправьте /cancel, чтобы отменить."
+    )
+
+
+def admin_broadcast_cancelled() -> str:
+    return "Рассылка отменена."
+
+
+def admin_broadcast_result(total: int, sent: int, failed: int) -> str:
+    return (
+        "Рассылка завершена.\n"
+        f"Получателей: {total}\n"
+        f"Доставлено: {sent}\n"
+        f"Не доставлено: {failed}"
+    )
+
+
+def _fmt_expiry_ms(expiry_ms: object) -> str:
+    try:
+        ms = int(expiry_ms or 0)
+    except (TypeError, ValueError):
+        return "?"
+    if ms <= 0:
+        return "без срока"
+    from datetime import UTC, datetime
+
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%d")
+
+
+def admin_panel_clients(server_id: int, clients: list, limit: int = 50) -> str:
+    if not clients:
+        return f"На сервере #{server_id} нет клиентов или нет доступа."
+    total = len(clients)
+    lines = [f"Клиенты панели сервера #{server_id} (всего {total}):"]
+    for c in clients[:limit]:
+        email = c.get("email") or "—"
+        sub = c.get("subId") or "—"
+        state = "вкл" if c.get("enable", True) else "выкл"
+        exp = _fmt_expiry_ms(c.get("expiryTime"))
+        lines.append(f"  {email} | subId={sub} | {state} | до {exp}")
+    if total > limit:
+        lines.append(f"  …и ещё {total - limit}")
+    lines.append(
+        "\nПривязать к боту: /bind <server_id> <email> <telegram_id>"
+    )
+    return "\n".join(lines)
+
+
+def admin_bind_result(result) -> str:
+    lines = [
+        "Клиент привязан к боту.",
+        f"Email в панели: {result.email}",
+        f"ID в боте (public_id): {result.public_id}",
+    ]
+    if result.expires_at is not None:
+        lines.append(f"Срок действия: до {result.expires_at:%Y-%m-%d %H:%M} UTC")
+    else:
+        lines.append("Срок действия: без срока (продлите командой /extend)")
+    if result.synced:
+        ok = sum(1 for r in result.results if r.ok)
+        failed = [(r.server_id, r.error) for r in result.results if not r.ok]
+        lines.append(f"Синхронизировано серверов: {ok}")
+        for sid, err in failed:
+            lines.append(f"  ошибка server {sid}: {err}")
+    else:
+        lines.append(
+            "Синхронизация по серверам пропущена (бессрочный клиент). "
+            "После /extend доступ применится ко всем серверам."
+        )
     return "\n".join(lines)
 
 
