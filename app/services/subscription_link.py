@@ -3,8 +3,20 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
-# Допустимые символы ID подписки в конце URL (hex, буквы, цифры, дефис).
-_PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
+# Допустимые символы ID подписки (hex, буквы, цифры, дефис, подчёркивание).
+_PUBLIC_ID_CHARS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_MIN_LEN_FROM_URL = 1
+_MIN_LEN_BARE = 3
+_MAX_LEN = 64
+
+
+def _is_valid_public_id(value: str, *, from_url: bool) -> bool:
+    if not value or len(value) > _MAX_LEN:
+        return False
+    min_len = _MIN_LEN_FROM_URL if from_url else _MIN_LEN_BARE
+    if len(value) < min_len:
+        return False
+    return _PUBLIC_ID_CHARS_RE.match(value) is not None
 
 
 def parse_subscription_public_id(link: str) -> str | None:
@@ -18,7 +30,7 @@ def parse_subscription_public_id(link: str) -> str | None:
     if not raw:
         return None
     # Если прислали только ID без URL.
-    if "://" not in raw and _PUBLIC_ID_RE.match(raw):
+    if "://" not in raw and _is_valid_public_id(raw, from_url=False):
         return raw
     try:
         parsed = urlparse(raw)
@@ -30,7 +42,7 @@ def parse_subscription_public_id(link: str) -> str | None:
     if not path:
         return None
     public_id = path.split("/")[-1].strip()
-    if not public_id or not _PUBLIC_ID_RE.match(public_id):
+    if not _is_valid_public_id(public_id, from_url=True):
         return None
     return public_id
 

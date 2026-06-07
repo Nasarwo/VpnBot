@@ -3,9 +3,11 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import User
+from app.db.enums import Protocol
+from app.db.models import Server, ServerInbound, User
 from app.db.repositories import BindRequestRepository
-from app.services import bind_requests
+from app.services import bind_requests, provisioning
+from app.services.panel_updater import MockPanelUpdater
 from app.services.subscription_link import (
     parse_subscription_public_id,
     subscription_link_example,
@@ -18,10 +20,14 @@ from app.services.subscription_link import (
         ("https://host:2096/sub/AB12CD34", "AB12CD34"),
         ("https://host:2096/subscribe/legacy-id", "legacy-id"),
         ("https://host/sub/path/MYID99", "MYID99"),
+        ("https://mind-forge.tech:49152/podpiso4kasub/dsh", "dsh"),
         ("MYID99", "MYID99"),
+        ("dsh", "dsh"),
         ("", None),
         ("https://host/", None),
         ("not a url", None),
+        ("ok", None),
+        ("ab", None),
     ],
 )
 def test_parse_subscription_public_id(link: str, expected: str | None):
@@ -78,3 +84,74 @@ async def test_create_bind_request_rejects_taken_public_id(session: AsyncSession
         await bind_requests.create_request(
             session, applicant, "https://x/sub/TAKEN01"
         )
+
+
+async def test_approve_bind_request_syncs_all_servers(
+    session: AsyncSession, monkeypatch
+):
+    user = User(telegram_id=555100, onboarding_done=True)
+    session.add(user)
+    await session.commit()
+
+    req = await bind_requests.create_request(
+        session, user, "https://panel.example:2096/sub/LEGACY99"
+    )
+
+    ru = Server(
+        name="ru",
+        country="RU",
+        panel_url="http://ru.local:2053",
+        username="a",
+        password="b",
+        enabled=True,
+    )
+    de = Server(
+        name="de",
+        country="DE",
+        panel_url="http://de.local:2053",
+        username="a",
+        password="b",
+        enabled=True,
+    )
+    session.add_all([ru, de])
+    await session.flush()
+    for srv in (ru, de):
+        session.add(
+            ServerInbound(
+                server_id=srv.id,
+                inbound_id=1,
+                protocol=Protocol.VLESS,
+                enabled=True,
+            )
+        )
+    await session.commit()
+
+    presences = [
+        provisioning.ServerClientPresence(
+            server=ru,
+            info=provisioning.PanelClientInfo(
+                email="legacy99",
+                sub_id="LEGACY99",
+                secret="sec-99",
+                expiry_ms=1_900_000_000_000,
+                enable=True,
+                inbound_ids=[1],
+            ),
+        ),
+    ]
+
+    async def fake_presence(sess, public_id, timeout=15.0):
+        return presences
+
+    monkeypatch.setattr(
+        provisioning, "find_client_presence_on_servers", fake_presence
+    )
+
+    updater = MockPanelUpdater()
+    result = await bind_requests.approve_request(
+        session, req.id, actor_user_id=None, updater=updater
+    )
+
+    assert result.applied is True
+    assert user.public_id == "LEGACY99"
+    assert len(updater.provisioned) == 2

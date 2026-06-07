@@ -28,6 +28,7 @@ class BillingResult:
     payment: PaymentRequest | None
     applied: bool
     already_applied: bool = False
+    first_purchase: bool = False
     new_expires_at: datetime | None = None
     failed_servers: list[ServerUpdateResult] = field(default_factory=list)
 
@@ -105,6 +106,8 @@ async def _extend_and_finalize(
     now: datetime,
 ) -> BillingResult:
     """Расчёт нового срока, обновление панелей и финализация статуса заявки."""
+    pay_repo = PaymentRepository(session)
+    first_purchase = await pay_repo.count_applied_for_user(payment.user_id) == 0
     client_repo = VpnClientRepository(session)
     client = await client_repo.get_for_user(payment.user_id)
     targets = await provisioning.has_targets(session)
@@ -192,7 +195,10 @@ async def _extend_and_finalize(
     )
     await session.commit()
     return BillingResult(
-        payment=payment, applied=True, new_expires_at=new_expiry
+        payment=payment,
+        applied=True,
+        first_purchase=first_purchase,
+        new_expires_at=new_expiry,
     )
 
 

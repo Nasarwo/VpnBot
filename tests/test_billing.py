@@ -59,6 +59,7 @@ async def test_confirm_payment_extends_expired(
     )
 
     assert result.applied is True
+    assert result.first_purchase is True
     assert result.payment.status == PaymentStatus.APPLIED
     assert result.payment.applied_at is not None
     refreshed = await VpnClientRepository(session).get_for_user(user.id)
@@ -88,6 +89,39 @@ async def test_double_confirm_is_idempotent(
     assert refreshed.expires_at == expiry_after_first
     # Панель не должна вызываться повторно
     assert len(updater.calls) == 1
+
+
+async def test_second_purchase_is_not_first(
+    session: AsyncSession, user: User, vpn_client: VpnClient
+):
+    repo = PaymentRepository(session)
+    first = await repo.create(
+        user_id=user.id,
+        amount=175,
+        period_days=30,
+        payment_code="PAY-3001",
+        status=PaymentStatus.WAITING_ADMIN,
+    )
+    await session.commit()
+    updater = MockPanelUpdater()
+    r1 = await billing.confirm_payment(
+        session, first.id, actor_user_id=user.id, updater=updater
+    )
+    assert r1.first_purchase is True
+
+    second = await repo.create(
+        user_id=user.id,
+        amount=175,
+        period_days=30,
+        payment_code="PAY-3002",
+        status=PaymentStatus.WAITING_ADMIN,
+    )
+    await session.commit()
+    r2 = await billing.confirm_payment(
+        session, second.id, actor_user_id=user.id, updater=updater
+    )
+    assert r2.applied is True
+    assert r2.first_purchase is False
 
 
 async def test_confirm_fails_when_panel_fails(

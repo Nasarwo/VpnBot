@@ -39,7 +39,9 @@ _PROTOCOL_MAP: dict[str, Protocol] = {
 }
 
 
-def _expiry_to_ms(expiry: datetime) -> int:
+def _expiry_to_ms(expiry: datetime | None) -> int:
+    if expiry is None:
+        return 0
     return int(expiry.timestamp() * 1000)
 
 
@@ -121,14 +123,15 @@ async def apply_access(
     session: AsyncSession,
     vpn_client: VpnClient,
     public_id: str,
-    expiry: datetime,
+    expiry: datetime | None,
     updater: PanelUpdater,
 ) -> list[ServerUpdateResult]:
     """Создаёт/обновляет клиента на всех включённых серверах.
 
     На каждый сервер заводится один глобальный клиент (email=subId=public_id),
     привязанный ко всем включённым inbound'ам этого сервера. Идемпотентно:
-    повторный вызов продлевает срок. Возвращает результат по каждому серверу.
+    повторный вызов продлевает срок. ``expiry=None`` — без срока (expiryTime=0).
+    Возвращает результат по каждому серверу.
     """
     expiry_ms = _expiry_to_ms(expiry)
 
@@ -152,12 +155,13 @@ async def apply_access(
     vpn_client.external_client_id = secret
 
     servers = await server_repo.list_enabled_with_inbounds()
+    expiry_label = expiry.isoformat() if expiry is not None else "без срока"
     logger.info(
         "apply_access: client_id=%s public_id=%s expiry=%s серверов=%s "
         "уже_привязано_серверов=%s",
         vpn_client.id,
         public_id,
-        expiry.isoformat(),
+        expiry_label,
         len(servers),
         len(existing_servers),
     )
@@ -347,6 +351,14 @@ class PanelClientInfo:
 
 
 @dataclass(slots=True)
+class ServerClientPresence:
+    """Клиент найден на конкретном сервере."""
+
+    server: Server
+    info: PanelClientInfo
+
+
+@dataclass(slots=True)
 class BindResult:
     public_id: str
     email: str
@@ -439,6 +451,193 @@ async def find_panel_client(
     )
 
 
+async def find_client_presence_on_servers(
+    session: AsyncSession,
+    public_id: str,
+    timeout: float = 15.0,
+) -> list[ServerClientPresence]:
+    """Ищет клиента по email или subId на всех включённых серверах."""
+    servers = await ServerRepository(session).list_enabled()
+    found: list[ServerClientPresence] = []
+    for server in servers:
+        info = await find_panel_client(server, public_id, timeout)
+        if info is None:
+            info = await _find_panel_client_by_sub_id(server, public_id, timeout)
+        if info is not None:
+            found.append(ServerClientPresence(server=server, info=info))
+    return found
+
+
+def _resolve_reference_expiry(
+    presences: list[ServerClientPresence],
+) -> datetime | None:
+    """Берёт максимальный срок среди серверов, где клиент уже есть."""
+    if not presences:
+        return None
+    finite = [p.info.expiry_ms for p in presences if p.info.expiry_ms > 0]
+    if not finite:
+        return None
+    return _ms_to_datetime(max(finite))
+
+
+def _resolve_client_identity(
+    presences: list[ServerClientPresence], public_id: str
+) -> tuple[str, str, str]:
+    """Возвращает (email, sub_id, secret) для синхронизации по всем серверам.
+
+    ``public_id`` — ID из ссылки-подписки (subId). Email в панели может отличаться
+    (например, email=``custom-user``, subId=``dsh``); для подписки всегда
+    используем ``public_id`` из ссылки.
+    """
+    anchor = presences[0]
+    for presence in presences:
+        if presence.info.secret:
+            anchor = presence
+            break
+    email = anchor.info.email or public_id
+    sub_id = public_id
+    secret = anchor.info.secret or _new_secret()
+    return email, sub_id, secret
+
+
+async def _ensure_presence_mappings(
+    session: AsyncSession,
+    client: VpnClient,
+    presences: list[ServerClientPresence],
+    email: str,
+    sub_id: str,
+    secret: str,
+) -> None:
+    """Создаёт записи привязки для серверов, где клиент уже найден на панели."""
+    mapping_repo = MappingRepository(session)
+    existing_servers = {
+        m.server_id for m in await mapping_repo.list_for_client(client.id)
+    }
+    server_repo = ServerRepository(session)
+    for presence in presences:
+        server = presence.server
+        if server.id in existing_servers:
+            continue
+        primary_inbound = (
+            presence.info.inbound_ids[0] if presence.info.inbound_ids else 0
+        )
+        configured = await server_repo.get_inbound(server.id, primary_inbound)
+        protocol = configured.protocol if configured else Protocol.VLESS
+        await mapping_repo.create(
+            vpn_client_id=client.id,
+            server_id=server.id,
+            inbound_id=primary_inbound,
+            protocol=protocol,
+            client_uuid=secret,
+            email=email,
+            sub_id=sub_id,
+        )
+        existing_servers.add(server.id)
+
+
+async def sync_bound_client_to_all_servers(
+    session: AsyncSession,
+    client: VpnClient,
+    public_id: str,
+    expiry: datetime | None,
+    updater: PanelUpdater,
+    *,
+    fail_on_partial: bool = True,
+) -> list[ServerUpdateResult]:
+    """Создаёт/обновляет клиента на всех серверах с inbound'ами.
+
+    На серверах, где клиента ещё нет, создаёт его с указанным сроком.
+    """
+    results = await apply_access(session, client, public_id, expiry, updater)
+    failed = [r for r in results if not r.ok]
+    if fail_on_partial and failed:
+        raise PanelUpdateError(
+            "; ".join(f"server {r.server_id}: {r.error}" for r in failed)
+        )
+    return results
+
+
+async def _finalize_bound_client(
+    session: AsyncSession,
+    user: User,
+    public_id: str,
+    presences: list[ServerClientPresence],
+    updater: PanelUpdater,
+) -> BindResult:
+    """Общая логика привязки: клиент в БД + синхронизация по всем серверам."""
+    if not presences:
+        raise PanelUpdateError(
+            f"Клиент с ID {public_id} не найден ни на одном настроенном сервере"
+        )
+
+    email, sub_id, secret = _resolve_client_identity(presences, public_id)
+    if await _public_id_taken(session, public_id, user.id):
+        raise PanelUpdateError(
+            f"ID {public_id} уже привязан к другому пользователю"
+        )
+
+    user.public_id = public_id
+    await session.flush()
+
+    reference_expiry = _resolve_reference_expiry(presences)
+    now = datetime.now(tz=UTC)
+    is_active = any(p.info.enable for p in presences) and (
+        reference_expiry is None or reference_expiry > now
+    )
+
+    client = await VpnClientRepository(session).get_for_user(user.id)
+    if client is None:
+        client = VpnClient(
+            user_id=user.id,
+            display_name=user.username or user.first_name,
+            email=email,
+            external_client_id=secret,
+            expires_at=reference_expiry,
+            is_active=is_active,
+        )
+        session.add(client)
+        await session.flush()
+    else:
+        client.email = email
+        client.external_client_id = secret
+        client.expires_at = reference_expiry
+        client.is_active = is_active
+        await session.flush()
+
+    await _ensure_presence_mappings(
+        session, client, presences, email, sub_id, secret
+    )
+
+    logger.info(
+        "finalize_bound_client: user=%s public_id=%s email=%s "
+        "найден_на_серверах=%s expiry=%s",
+        user.id,
+        public_id,
+        email,
+        [p.server.id for p in presences],
+        reference_expiry.isoformat() if reference_expiry else "без срока",
+    )
+
+    results = await sync_bound_client_to_all_servers(
+        session,
+        client,
+        public_id,
+        reference_expiry,
+        updater,
+        fail_on_partial=True,
+    )
+
+    inbound_ids = presences[0].info.inbound_ids
+    return BindResult(
+        public_id=public_id,
+        email=email,
+        expires_at=reference_expiry,
+        inbound_ids=inbound_ids,
+        synced=True,
+        results=results,
+    )
+
+
 async def _public_id_taken(
     session: AsyncSession, public_id: str, exclude_user_id: int
 ) -> bool:
@@ -460,104 +659,22 @@ async def bind_existing_client(
 ) -> BindResult:
     """Привязывает существующего клиента панели к пользователю бота.
 
-    Сохраняет UUID/secret, subId и срок действия клиента, чтобы дальнейшие
-    продления шли по уже существующему клиенту, а не создавали нового.
+    Ищет клиента на всех серверах, создаёт недостающие записи на панелях
+    с тем же сроком, что уже выставлен на серверах, где клиент есть.
     """
     info = await find_panel_client(server, email, timeout)
     if info is None:
         raise PanelUpdateError(
             f"Клиент {email} не найден на панели сервера #{server.id}"
         )
-    secret = info.secret or _new_secret()
 
-    # Идентичность подписки: если у клиента есть subId — принимаем его как
-    # public_id пользователя (чтобы ссылка-подписка совпадала). Иначе используем
-    # текущий public_id и проставим его клиенту как subId при синхронизации.
-    if info.sub_id:
-        if await _public_id_taken(session, info.sub_id, user.id):
-            raise PanelUpdateError(
-                f"subId {info.sub_id} уже привязан к другому пользователю"
-            )
-        user.public_id = info.sub_id
-        sub_id = info.sub_id
-    else:
-        sub_id = user.public_id or info.email
-    await session.flush()
+    public_id = info.sub_id or user.public_id or info.email
+    presences = await find_client_presence_on_servers(session, public_id, timeout)
+    if not presences:
+        presences = [ServerClientPresence(server=server, info=info)]
 
-    expires_at = _ms_to_datetime(info.expiry_ms)
-
-    client = await VpnClientRepository(session).get_for_user(user.id)
-    if client is None:
-        client = VpnClient(
-            user_id=user.id,
-            display_name=user.username or user.first_name,
-            email=info.email,
-            external_client_id=secret,
-            expires_at=expires_at,
-            is_active=info.enable and (expires_at is None or expires_at > datetime.now(tz=UTC)),
-        )
-        session.add(client)
-        await session.flush()
-    else:
-        client.email = info.email
-        client.external_client_id = secret
-        client.expires_at = expires_at
-        client.is_active = info.enable and (
-            expires_at is None or expires_at > datetime.now(tz=UTC)
-        )
-        await session.flush()
-
-    mapping_repo = MappingRepository(session)
-    existing_servers = {
-        m.server_id
-        for m in await mapping_repo.list_for_client(client.id)
-    }
-    if server.id not in existing_servers:
-        primary_inbound = info.inbound_ids[0] if info.inbound_ids else 0
-        configured = await ServerRepository(session).get_inbound(
-            server.id, primary_inbound
-        )
-        protocol = configured.protocol if configured else Protocol.VLESS
-        await mapping_repo.create(
-            vpn_client_id=client.id,
-            server_id=server.id,
-            inbound_id=primary_inbound,
-            protocol=protocol,
-            client_uuid=secret,
-            email=info.email,
-            sub_id=sub_id,
-        )
-
-    logger.info(
-        "bind_existing_client: user=%s public_id=%s email=%s server=%s "
-        "secret=%s expiry=%s inbounds=%s",
-        user.id,
-        user.public_id,
-        info.email,
-        server.id,
-        "есть" if info.secret else "сгенерирован",
-        expires_at.isoformat() if expires_at else "без срока",
-        info.inbound_ids,
-    )
-
-    # Синхронизируем идентичность и subId по всем серверам, не меняя срок.
-    # Для «бессрочных» клиентов (expiry=0) синхронизацию пропускаем, чтобы не
-    # выставить им конечный срок.
-    results: list[ServerUpdateResult] = []
-    synced = False
-    if expires_at is not None:
-        results = await apply_access(
-            session, client, user.public_id or sub_id, expires_at, updater
-        )
-        synced = True
-
-    return BindResult(
-        public_id=user.public_id or sub_id,
-        email=info.email,
-        expires_at=expires_at,
-        inbound_ids=info.inbound_ids,
-        synced=synced,
-        results=results,
+    return await _finalize_bound_client(
+        session, user, public_id, presences, updater
     )
 
 
@@ -570,42 +687,17 @@ async def bind_user_by_public_id(
 ) -> BindResult:
     """Привязывает пользователя по ID из ссылки-подписки.
 
-    Ищет клиента с email или subId = public_id на любом включённом сервере,
-    затем синхронизирует доступ по всем серверам.
+    Ищет клиента на всех включённых серверах, затем создаёт его на серверах,
+    где записи ещё нет, с тем же сроком, что на уже существующих.
     """
     if await _public_id_taken(session, public_id, user.id):
         raise PanelUpdateError(
             f"ID {public_id} уже привязан к другому пользователю бота"
         )
 
-    user.public_id = public_id
-    await session.flush()
-
-    servers = await ServerRepository(session).list_enabled()
-    last_error: str | None = None
-    for server in servers:
-        info = await find_panel_client(server, public_id, timeout)
-        if info is None:
-            info = await _find_panel_client_by_sub_id(server, public_id, timeout)
-        if info is None:
-            continue
-        email = info.email or public_id
-        try:
-            result = await bind_existing_client(
-                session, server, email, user, updater, timeout
-            )
-        except PanelUpdateError as exc:
-            last_error = str(exc)
-            continue
-        # ID из ссылки — источник истины для public_id пользователя.
-        user.public_id = public_id
-        await session.flush()
-        return result
-
-    if last_error:
-        raise PanelUpdateError(last_error)
-    raise PanelUpdateError(
-        f"Клиент с ID {public_id} не найден ни на одном настроенном сервере"
+    presences = await find_client_presence_on_servers(session, public_id, timeout)
+    return await _finalize_bound_client(
+        session, user, public_id, presences, updater
     )
 
 

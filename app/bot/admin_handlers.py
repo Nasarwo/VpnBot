@@ -541,7 +541,10 @@ async def on_payment_action(
             client = await VpnClientRepository(session).get_for_user(payment.user_id)
             if client is not None:
                 await notify.notify_user_extended(
-                    callback.bot, payment.user.telegram_id, client
+                    callback.bot,
+                    payment.user.telegram_id,
+                    client,
+                    first_purchase=result.first_purchase,
                 )
             await callback.message.edit_text(
                 f"Готово. Доступ продлён.\n\n"
@@ -619,7 +622,10 @@ async def confirm_cmd(
         client = await VpnClientRepository(session).get_for_user(full.user_id)
         if client is not None:
             await notify.notify_user_extended(
-                message.bot, full.user.telegram_id, client
+                message.bot,
+                full.user.telegram_id,
+                client,
+                first_purchase=result.first_purchase,
             )
         await message.answer(
             f"Готово. Заявка {code_html} подтверждена, доступ продлён.",

@@ -389,6 +389,16 @@ class PaymentRepository:
         result = await self.session.execute(select(func.count(PaymentRequest.id)))
         return int(result.scalar_one())
 
+    async def count_applied_for_user(self, user_id: int) -> int:
+        from sqlalchemy import func
+
+        result = await self.session.execute(
+            select(func.count(PaymentRequest.id))
+            .where(PaymentRequest.user_id == user_id)
+            .where(PaymentRequest.status == PaymentStatus.APPLIED)
+        )
+        return int(result.scalar_one())
+
     async def delete(self, payment: PaymentRequest) -> None:
         """Удаляет заявку (вместе с вложениями по каскаду)."""
         await self.session.delete(payment)
