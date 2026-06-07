@@ -23,9 +23,10 @@ class Settings(BaseSettings):
 
     payment_amount_rub: int = 175
     payment_period_days: int = 30
-    trial_period_days: int = 2
+    trial_period_days: int = 3
     payment_details_text: str = (
-        "Реквизиты для перевода: укажите здесь номер карты или СБП."
+        "<code>+79013855871</code> (Альфа-банк по СБП)\n"
+        "<code>2204 3203 4452 2539</code> (Озон-банк на карту)"
     )
     support_contact: str = "@support"
 
@@ -45,6 +46,12 @@ class Settings(BaseSettings):
     auto_block_enabled: bool = False
     tracking_window_hours: int = 24
     anti_sharing_poll_minutes: int = 5
+
+    # Период фоновой проверки доступности серверов, секунды (0 — отключить).
+    server_health_poll_seconds: int = 60
+
+    # Период проверки истекающих подписок для уведомлений, секунды (0 — отключить).
+    expiry_notify_poll_seconds: int = 300
 
     @field_validator("bot_token", mode="before")
     @classmethod

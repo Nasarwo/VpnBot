@@ -560,6 +560,30 @@ class XuiClient:
         )
         return self._clients_api
 
+    async def list_client_records(self) -> list[dict[str, Any]]:
+        """Список всех клиентов панели.
+
+        На 3x-ui >= 3.2.x берётся из /panel/api/clients/list (глобальные клиенты).
+        На старых панелях собирается из settings.clients[] всех inbound'ов;
+        для таких записей добавляется ключ "_inbound_id".
+        """
+        if await self.supports_clients_api():
+            response = await self._api("GET", "/panel/api/clients/list")
+            data = self._parse_json(response)
+            if not data.get("success", False):
+                raise XuiError(
+                    f"Не удалось получить список клиентов: {data.get('msg')}"
+                )
+            obj = data.get("obj", [])
+            return obj if isinstance(obj, list) else []
+
+        clients: list[dict[str, Any]] = []
+        for inbound in await self.list_inbounds():
+            inbound_id = inbound.get("id")
+            for client in self._extract_clients(inbound):
+                clients.append({**client, "_inbound_id": inbound_id})
+        return clients
+
     async def get_client_record(self, email: str) -> dict[str, Any] | None:
         """Возвращает запись клиента нового API: {"client": {...}, "inboundIds": [...]}.
 

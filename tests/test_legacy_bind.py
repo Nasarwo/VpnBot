@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models import User
+from app.db.repositories import BindRequestRepository
+from app.services import bind_requests
+from app.services.subscription_link import (
+    parse_subscription_public_id,
+    subscription_link_example,
+)
+
+
+@pytest.mark.parametrize(
+    "link,expected",
+    [
+        ("https://host:2096/sub/AB12CD34", "AB12CD34"),
+        ("https://host:2096/subscribe/legacy-id", "legacy-id"),
+        ("https://host/sub/path/MYID99", "MYID99"),
+        ("MYID99", "MYID99"),
+        ("", None),
+        ("https://host/", None),
+        ("not a url", None),
+    ],
+)
+def test_parse_subscription_public_id(link: str, expected: str | None):
+    assert parse_subscription_public_id(link) == expected
+
+
+def test_subscription_link_example_is_abstract():
+    assert subscription_link_example() == "https://example.com:2096/sub/ID"
+
+
+async def test_create_bind_request(session: AsyncSession):
+    user = User(
+        telegram_id=555001,
+        username="legacy",
+        first_name="Legacy",
+        onboarding_done=False,
+    )
+    session.add(user)
+    await session.commit()
+
+    await bind_requests.create_request(
+        session,
+        user,
+        "https://panel.example:2096/sub/LEGACY42",
+    )
+    repo = BindRequestRepository(session)
+    pending = await repo.latest_waiting_for_user(user.id)
+    assert pending is not None
+    assert pending.public_id == "LEGACY42"
+    assert pending.request_code.startswith("BIND-")
+    assert user.onboarding_done is True
+
+
+async def test_create_bind_request_rejects_invalid_link(session: AsyncSession):
+    user = User(telegram_id=555002, onboarding_done=False)
+    session.add(user)
+    await session.commit()
+
+    with pytest.raises(bind_requests.BindRequestError):
+        await bind_requests.create_request(session, user, "это не ссылка")
+
+    assert user.onboarding_done is False
+    repo = BindRequestRepository(session)
+    assert await repo.latest_waiting_for_user(user.id) is None
+
+
+async def test_create_bind_request_rejects_taken_public_id(session: AsyncSession):
+    owner = User(telegram_id=1, public_id="TAKEN01", onboarding_done=True)
+    applicant = User(telegram_id=2, onboarding_done=False)
+    session.add_all([owner, applicant])
+    await session.commit()
+
+    with pytest.raises(bind_requests.BindRequestError):
+        await bind_requests.create_request(
+            session, applicant, "https://x/sub/TAKEN01"
+        )

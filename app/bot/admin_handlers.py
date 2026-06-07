@@ -2,25 +2,30 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from html import escape
 
-from aiogram import Router
+from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import keyboards, notify, texts
-from app.bot.callbacks import PaymentCallback
+from app.bot.callbacks import AdminCallback, BindCallback, PaymentCallback
 from app.bot.filters import IsAdmin
+from app.bot.states import AdminStates
 from app.config import Settings
-from app.db.enums import PaymentStatus, Protocol
+from app.db.enums import BindRequestStatus, PaymentStatus, Protocol
 from app.db.models import Server, ServerInbound, User
 from app.db.repositories import (
+    BindRequestRepository,
     PaymentRepository,
     ServerRepository,
     UserRepository,
     VpnClientRepository,
 )
-from app.services import antishare, billing, provisioning
+from app.services import antishare, billing, bind_requests, broadcast, provisioning
 from app.services.ip_provider import build_ip_provider
 from app.services.panel_updater import PanelUpdateError, PanelUpdater
 from app.services.xui_client import XuiClient, XuiError
@@ -35,6 +40,428 @@ router.callback_query.filter(IsAdmin())
 
 def _get_updater(settings: Settings) -> PanelUpdater:
     return build_updater(timeout=float(settings.xui_request_timeout))
+
+
+def _parse_server_line(raw: str) -> tuple[Server | None, str | None]:
+    """Парсит строку 'name|country|panel_url|username|password|[kind]|[sub]'.
+
+    Возвращает (server, None) при успехе или (None, текст ошибки).
+    """
+    parts = [p.strip() for p in (raw or "").split("|")]
+    if len(parts) < 5:
+        return None, (
+            "Нужно минимум 5 полей через «|».\n"
+            "Формат: name|country|panel_url|username|password|[kind]|[sub]"
+        )
+    name, country, panel_url, username, password = parts[:5]
+    if not all([name, panel_url, username, password]):
+        return None, "Обязательны поля: name, panel_url, username, password."
+    kind = parts[5] if len(parts) > 5 and parts[5] else "direct"
+    sub_base = parts[6] if len(parts) > 6 and parts[6] else None
+    server = Server(
+        name=name,
+        country=country or None,
+        panel_url=panel_url,
+        username=username,
+        password=password,
+        kind=kind,
+        subscription_base=sub_base,
+        enabled=True,
+    )
+    return server, None
+
+
+async def _finalize_new_server(
+    session: AsyncSession, server: Server, settings: Settings
+) -> str:
+    """Сохраняет сервер и сразу пытается импортировать его inbound'ы.
+
+    Так добавленный сервер становится готовой целью провижининга без отдельного
+    ручного шага импорта.
+    """
+    await ServerRepository(session).add(server)
+    await session.commit()
+    text = f"Сервер добавлен: #{server.id} {server.name}"
+    try:
+        summary = await provisioning.import_inbounds(
+            session, server, timeout=float(settings.xui_request_timeout)
+        )
+        await session.commit()
+        text += "\n\n" + texts.admin_import_inbounds(server.id, summary)
+    except PanelUpdateError as exc:
+        text += (
+            f"\n\nInbound'ы не импортированы автоматически: {exc}\n"
+            "Запустите импорт вручную в /admin → сервер → «Импорт inbound'ов»."
+        )
+    return text
+
+
+async def _edit_panel(
+    callback: CallbackQuery,
+    text: str,
+    markup,
+    alert: str | None = None,
+    parse_mode: str | None = None,
+) -> None:
+    """Редактирует сообщение админ-панели, мягко гасит ошибки.
+
+    parse_mode=None — обычный текст (безопасно для URL/email в карточках серверов).
+    parse_mode="HTML" — там, где в тексте есть разметка (например, <code> в заявках).
+    """
+    try:
+        await callback.message.edit_text(
+            text, reply_markup=markup, parse_mode=parse_mode
+        )
+    except TelegramBadRequest:
+        # сообщение не изменилось / нельзя отредактировать — игнорируем
+        pass
+    await callback.answer(alert, show_alert=bool(alert))
+
+
+@router.message(Command("admin"))
+async def admin_panel(message: Message, session: AsyncSession) -> None:
+    servers = await ServerRepository(session).list_all()
+    await message.answer(
+        texts.admin_panel_home(servers),
+        reply_markup=keyboards.admin_home_keyboard(),
+    )
+
+
+@router.callback_query(AdminCallback.filter())
+async def admin_nav(
+    callback: CallbackQuery,
+    callback_data: AdminCallback,
+    session: AsyncSession,
+    db_user: User,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    action = callback_data.action
+    sid = callback_data.server_id
+    repo = ServerRepository(session)
+    logger.info(
+        "Админ tg=%s панель действие=%s server_id=%s",
+        db_user.telegram_id,
+        action,
+        sid,
+    )
+
+    if action == "home":
+        await state.clear()
+        servers = await repo.list_all()
+        await _edit_panel(
+            callback, texts.admin_panel_home(servers),
+            keyboards.admin_home_keyboard(),
+        )
+        return
+
+    if action == "servers":
+        await state.clear()
+        servers = await repo.list_all()
+        await _edit_panel(
+            callback, texts.admin_servers_title(servers),
+            keyboards.admin_servers_keyboard(servers),
+        )
+        return
+
+    if action == "server":
+        server = await repo.get_with_inbounds(sid)
+        if server is None:
+            servers = await repo.list_all()
+            await _edit_panel(
+                callback, texts.admin_servers_title(servers),
+                keyboards.admin_servers_keyboard(servers),
+                alert="Сервер не найден",
+            )
+            return
+        await _edit_panel(
+            callback, texts.admin_server_detail(server),
+            keyboards.admin_server_keyboard(server),
+        )
+        return
+
+    if action == "toggle":
+        server = await repo.get_by_id(sid)
+        if server is None:
+            await callback.answer("Сервер не найден", show_alert=True)
+            return
+        server.enabled = not server.enabled
+        await session.commit()
+        server = await repo.get_with_inbounds(sid)
+        await _edit_panel(
+            callback, texts.admin_server_detail(server),
+            keyboards.admin_server_keyboard(server),
+            alert="Включён" if server.enabled else "Выключен",
+        )
+        return
+
+    if action == "import":
+        server = await repo.get_by_id(sid)
+        if server is None:
+            await callback.answer("Сервер не найден", show_alert=True)
+            return
+        try:
+            summary = await provisioning.import_inbounds(
+                session, server, timeout=float(settings.xui_request_timeout)
+            )
+        except PanelUpdateError as exc:
+            await callback.answer(f"Ошибка панели: {exc}"[:200], show_alert=True)
+            return
+        await session.commit()
+        server = await repo.get_with_inbounds(sid)
+        await _edit_panel(
+            callback,
+            texts.admin_import_inbounds(sid, summary)
+            + "\n\n"
+            + texts.admin_server_detail(server),
+            keyboards.admin_server_keyboard(server),
+            alert="Inbound'ы импортированы",
+        )
+        return
+
+    if action == "clients":
+        server = await repo.get_by_id(sid)
+        if server is None:
+            await callback.answer("Сервер не найден", show_alert=True)
+            return
+        try:
+            clients = await provisioning.list_panel_clients(
+                server, timeout=float(settings.xui_request_timeout)
+            )
+        except PanelUpdateError as exc:
+            await callback.answer(f"Ошибка панели: {exc}"[:200], show_alert=True)
+            return
+        await _edit_panel(
+            callback, texts.admin_panel_clients(sid, clients),
+            keyboards.admin_back_keyboard("server", sid),
+        )
+        return
+
+    if action == "del":
+        server = await repo.get_by_id(sid)
+        if server is None:
+            await callback.answer("Сервер не найден", show_alert=True)
+            return
+        await _edit_panel(
+            callback, texts.admin_confirm_delete(server),
+            keyboards.admin_confirm_delete_keyboard(sid),
+        )
+        return
+
+    if action == "del_yes":
+        server = await repo.get_by_id(sid)
+        name = server.name if server else "?"
+        deleted = await repo.delete(sid)
+        if deleted:
+            await session.commit()
+            logger.info("Админ tg=%s удалил сервер #%s", db_user.telegram_id, sid)
+        servers = await repo.list_all()
+        await _edit_panel(
+            callback, texts.admin_servers_title(servers),
+            keyboards.admin_servers_keyboard(servers),
+            alert=(
+                texts.admin_server_deleted(sid, name)
+                if deleted
+                else "Сервер не найден"
+            ),
+        )
+        return
+
+    if action == "add":
+        await state.set_state(AdminStates.waiting_server_line)
+        await _edit_panel(
+            callback, texts.admin_add_server_prompt(),
+            keyboards.admin_back_keyboard("servers"),
+        )
+        return
+
+    if action == "broadcast":
+        await state.set_state(AdminStates.waiting_broadcast)
+        count = await UserRepository(session).count()
+        await _edit_panel(
+            callback, texts.admin_broadcast_prompt(count),
+            keyboards.admin_back_keyboard("home"),
+        )
+        return
+
+    if action == "pending":
+        payments = await PaymentRepository(session).list_waiting_admin()
+        binds = await BindRequestRepository(session).list_waiting_admin()
+        body = texts.admin_pending(payments)
+        body += "\n\n" + texts.admin_bind_pending(binds)
+        await _edit_panel(
+            callback, body,
+            keyboards.admin_back_keyboard("home"),
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "sharing":
+        if not settings.anti_sharing_enabled:
+            await _edit_panel(
+                callback, texts.sharing_disabled(),
+                keyboards.admin_back_keyboard("home"),
+            )
+            return
+        flagged = await antishare.list_flagged(session, settings)
+        await _edit_panel(
+            callback, texts.sharing_summary(flagged),
+            keyboards.admin_back_keyboard("home"),
+        )
+        return
+
+    await callback.answer("Неизвестное действие", show_alert=True)
+
+
+@router.message(AdminStates.waiting_server_line, Command("cancel"))
+async def admin_add_server_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(texts.admin_add_cancelled())
+
+
+@router.message(AdminStates.waiting_server_line, F.text)
+async def admin_add_server_line(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+    settings: Settings,
+) -> None:
+    server, error = _parse_server_line(message.text or "")
+    if error is not None:
+        await message.answer(error + "\n\nИли отправьте /cancel.")
+        return
+    text = await _finalize_new_server(session, server, settings)
+    await state.clear()
+    logger.info(
+        "Админ tg=%s добавил сервер #%s через панель",
+        message.from_user.id if message.from_user else "?",
+        server.id,
+    )
+    servers = await ServerRepository(session).list_all()
+    await message.answer(
+        text, reply_markup=keyboards.admin_servers_keyboard(servers)
+    )
+
+
+@router.message(AdminStates.waiting_broadcast, Command("cancel"))
+async def admin_broadcast_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(texts.admin_broadcast_cancelled())
+
+
+@router.message(AdminStates.waiting_broadcast, F.text)
+async def admin_broadcast_send(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+    db_user: User,
+) -> None:
+    text = message.text or ""
+    await state.clear()
+    telegram_ids = await UserRepository(session).all_telegram_ids()
+    logger.info(
+        "Админ tg=%s запустил рассылку на %s получателей",
+        db_user.telegram_id,
+        len(telegram_ids),
+    )
+    await message.answer(f"Начинаю рассылку на {len(telegram_ids)} получателей…")
+    result = await broadcast.send_broadcast(message.bot, telegram_ids, text)
+    await message.answer(
+        texts.admin_broadcast_result(result.total, result.sent, result.failed),
+        reply_markup=keyboards.admin_home_keyboard(),
+    )
+
+
+@router.callback_query(BindCallback.filter())
+async def on_bind_action(
+    callback: CallbackQuery,
+    callback_data: BindCallback,
+    session: AsyncSession,
+    db_user: User,
+    settings: Settings,
+) -> None:
+    action = callback_data.action
+    request_id = callback_data.request_id
+    logger.info(
+        "Админ tg=%s действие=%s по привязке id=%s",
+        db_user.telegram_id,
+        action,
+        request_id,
+    )
+    bind_repo = BindRequestRepository(session)
+    updater = _get_updater(settings)
+
+    if action == "reject":
+        try:
+            await bind_requests.reject_request(
+                session, request_id, actor_user_id=db_user.id
+            )
+        except bind_requests.BindRequestError as exc:
+            await callback.answer(str(exc), show_alert=True)
+            return
+        full = await bind_repo.get_by_id_with_user(request_id)
+        if full is not None and full.user is not None:
+            await notify.notify_user_bind_rejected(
+                callback.bot, full.user.telegram_id, full.request_code
+            )
+        await callback.message.edit_text(
+            f"Привязка отклонена.\n\n{texts.admin_bind_card(full, full.user)}",
+            parse_mode="HTML",
+        )
+        await callback.answer("Привязка отклонена")
+        return
+
+    if action in ("confirm", "retry"):
+        try:
+            if action == "confirm":
+                result = await bind_requests.approve_request(
+                    session, request_id, actor_user_id=db_user.id, updater=updater
+                )
+            else:
+                result = await bind_requests.retry_request(
+                    session, request_id, actor_user_id=db_user.id, updater=updater
+                )
+        except bind_requests.BindRequestError as exc:
+            await callback.answer(str(exc), show_alert=True)
+            return
+
+        full = await bind_repo.get_by_id_with_user(request_id)
+        if full is None:
+            await callback.answer("Заявка не найдена", show_alert=True)
+            return
+
+        if result.already_applied:
+            await callback.answer("Привязка уже выполнена ранее", show_alert=True)
+            return
+
+        if result.applied and full.user is not None:
+            await notify.notify_user_bind_approved(
+                callback.bot, full.user.telegram_id, full.public_id
+            )
+            await callback.message.edit_text(
+                f"Готово. Аккаунт привязан.\n\n"
+                f"{texts.admin_bind_card(full, full.user)}",
+                parse_mode="HTML",
+            )
+            await callback.answer("Привязка выполнена")
+            return
+
+        if full.user is not None:
+            await notify.notify_admins_bind_failed(
+                callback.bot, settings, full, full.user
+            )
+        card = texts.admin_bind_card(full, full.user)
+        if full.last_error:
+            card += f"\n\nОшибка: {escape(full.last_error)}"
+        await callback.message.edit_text(
+            f"Ошибка привязки.\n\n{card}",
+            reply_markup=keyboards.admin_bind_retry_keyboard(request_id),
+            parse_mode="HTML",
+        )
+        await callback.answer("Не удалось привязать", show_alert=True)
+        return
+
+    await callback.answer("Неизвестное действие", show_alert=True)
 
 
 @router.callback_query(PaymentCallback.filter())
@@ -61,7 +488,9 @@ async def on_payment_action(
             await callback.answer("Заявка не найдена", show_alert=True)
             return
         history = await pay_repo.history_for_user(payment.user_id)
-        await callback.message.answer(texts.admin_history(history))
+        await callback.message.answer(
+            texts.admin_history(history), parse_mode="HTML"
+        )
         await callback.answer()
         return
 
@@ -85,7 +514,8 @@ async def on_payment_action(
                 callback.bot, payment.user.telegram_id, payment.payment_code
             )
         await callback.message.edit_text(
-            f"Заявка отклонена.\n\n{texts.admin_payment_card(payment, payment.user)}"
+            f"Заявка отклонена.\n\n{texts.admin_payment_card(payment, payment.user)}",
+            parse_mode="HTML",
         )
         await callback.answer("Заявка отклонена")
         return
@@ -115,7 +545,8 @@ async def on_payment_action(
                 )
             await callback.message.edit_text(
                 f"Готово. Доступ продлён.\n\n"
-                f"{texts.admin_payment_card(payment, payment.user)}"
+                f"{texts.admin_payment_card(payment, payment.user)}",
+                parse_mode="HTML",
             )
             await callback.answer("Доступ продлён")
             return
@@ -128,6 +559,7 @@ async def on_payment_action(
                 f"Ошибка применения.\n\n"
                 f"{texts.admin_payment_card(payment, payment.user)}",
                 reply_markup=keyboards.admin_retry_keyboard(payment_id),
+                parse_mode="HTML",
             )
         await callback.answer("Не удалось применить продление", show_alert=True)
         return
@@ -138,7 +570,9 @@ async def on_payment_action(
 @router.message(Command("pending"))
 async def list_pending(message: Message, session: AsyncSession) -> None:
     payments = await PaymentRepository(session).list_waiting_admin()
-    await message.answer(texts.admin_pending(payments))
+    binds = await BindRequestRepository(session).list_waiting_admin()
+    body = texts.admin_pending(payments) + "\n\n" + texts.admin_bind_pending(binds)
+    await message.answer(body, parse_mode="HTML")
 
 
 @router.message(Command("confirm"))
@@ -175,8 +609,11 @@ async def confirm_cmd(
         return
 
     full = await pay_repo.get_by_id_with_relations(payment.id)
+    code_html = f"<code>{escape(code)}</code>"
     if result.already_applied:
-        await message.answer(f"Заявка {code} уже была применена ранее.")
+        await message.answer(
+            f"Заявка {code_html} уже была применена ранее.", parse_mode="HTML"
+        )
         return
     if result.applied and full is not None:
         client = await VpnClientRepository(session).get_for_user(full.user_id)
@@ -184,14 +621,18 @@ async def confirm_cmd(
             await notify.notify_user_extended(
                 message.bot, full.user.telegram_id, client
             )
-        await message.answer(f"Готово. Заявка {code} подтверждена, доступ продлён.")
+        await message.answer(
+            f"Готово. Заявка {code_html} подтверждена, доступ продлён.",
+            parse_mode="HTML",
+        )
         return
 
     if full is not None:
         await notify.notify_admins_failed(message.bot, settings, full, full.user)
     await message.answer(
-        f"Не удалось применить продление по заявке {code} "
-        "(серверы 3x-ui недоступны). Повторите команду /confirm позже."
+        f"Не удалось применить продление по заявке {code_html} "
+        "(серверы 3x-ui недоступны). Повторите команду /confirm позже.",
+        parse_mode="HTML",
     )
 
 
@@ -219,7 +660,101 @@ async def reject_cmd(
         await notify.notify_user_rejected(
             message.bot, full.user.telegram_id, full.payment_code
         )
-    await message.answer(f"Заявка {code} отклонена.")
+    await message.answer(
+        f"Заявка <code>{escape(code)}</code> отклонена.", parse_mode="HTML"
+    )
+
+
+@router.message(Command("confirmbind"))
+async def confirm_bind_cmd(
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    db_user: User,
+    settings: Settings,
+) -> None:
+    code = (command.args or "").strip()
+    if not code:
+        await message.answer(
+            "Использование: /confirmbind <код>, например /confirmbind BIND-2001"
+        )
+        return
+
+    bind_repo = BindRequestRepository(session)
+    req = await bind_repo.get_by_code(code)
+    if req is None:
+        await message.answer("Заявка на привязку с таким кодом не найдена")
+        return
+
+    updater = _get_updater(settings)
+    try:
+        if req.status == BindRequestStatus.FAILED:
+            result = await bind_requests.retry_request(
+                session, req.id, actor_user_id=db_user.id, updater=updater
+            )
+        else:
+            result = await bind_requests.approve_request(
+                session, req.id, actor_user_id=db_user.id, updater=updater
+            )
+    except bind_requests.BindRequestError as exc:
+        await message.answer(str(exc))
+        return
+
+    full = await bind_repo.get_by_id_with_user(req.id)
+    code_html = f"<code>{escape(code)}</code>"
+    if result.already_applied:
+        await message.answer(
+            f"Заявка {code_html} уже была применена ранее.", parse_mode="HTML"
+        )
+        return
+    if result.applied and full is not None and full.user is not None:
+        await notify.notify_user_bind_approved(
+            message.bot, full.user.telegram_id, full.public_id
+        )
+        await message.answer(
+            f"Готово. Заявка {code_html} подтверждена, аккаунт привязан.",
+            parse_mode="HTML",
+        )
+        return
+
+    if full is not None and full.user is not None:
+        await notify.notify_admins_bind_failed(message.bot, settings, full, full.user)
+    await message.answer(
+        f"Не удалось привязать по заявке {code_html}. "
+        "Повторите /confirmbind позже.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("rejectbind"))
+async def reject_bind_cmd(
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    db_user: User,
+) -> None:
+    code = (command.args or "").strip()
+    if not code:
+        await message.answer(
+            "Использование: /rejectbind <код>, например /rejectbind BIND-2001"
+        )
+        return
+
+    bind_repo = BindRequestRepository(session)
+    req = await bind_repo.get_by_code(code)
+    if req is None:
+        await message.answer("Заявка на привязку с таким кодом не найдена")
+        return
+
+    await bind_requests.reject_request(session, req.id, actor_user_id=db_user.id)
+    full = await bind_repo.get_by_id_with_user(req.id)
+    if full is not None and full.user is not None:
+        await notify.notify_user_bind_rejected(
+            message.bot, full.user.telegram_id, full.request_code
+        )
+    await message.answer(
+        f"Заявка <code>{escape(code)}</code> отклонена.", parse_mode="HTML"
+    )
 
 
 @router.message(Command("sharing"))
@@ -293,11 +828,13 @@ async def list_servers(message: Message, session: AsyncSession) -> None:
 
 @router.message(Command("addserver"))
 async def add_server(
-    message: Message, command: CommandObject, session: AsyncSession
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    settings: Settings,
 ) -> None:
     raw = (command.args or "").strip()
-    parts = [p.strip() for p in raw.split("|")]
-    if len(parts) < 5:
+    if not raw:
         await message.answer(
             "Формат: /addserver name|country|panel_url|username|password"
             "|[kind]|[subscription_base]\n"
@@ -305,22 +842,12 @@ async def add_server(
             "https://de:2096/sub/"
         )
         return
-    name, country, panel_url, username, password = parts[:5]
-    kind = parts[5] if len(parts) > 5 and parts[5] else "direct"
-    sub_base = parts[6] if len(parts) > 6 and parts[6] else None
-    server = Server(
-        name=name,
-        country=country or None,
-        panel_url=panel_url,
-        username=username,
-        password=password,
-        kind=kind,
-        subscription_base=sub_base,
-        enabled=True,
-    )
-    session.add(server)
-    await session.commit()
-    await message.answer(f"Сервер добавлен: #{server.id} {server.name}")
+    server, error = _parse_server_line(raw)
+    if error is not None:
+        await message.answer(error)
+        return
+    text = await _finalize_new_server(session, server, settings)
+    await message.answer(text)
 
 
 @router.message(Command("addinbound"))
@@ -543,6 +1070,93 @@ async def provision_user(
     ok = [r.server_id for r in results if r.ok]
     failed = [(r.server_id, r.error) for r in results if not r.ok]
     await message.answer(texts.admin_provision_result(ok, failed))
+
+
+@router.message(Command("panelclients"))
+async def list_panel_clients_cmd(
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    args = (command.args or "").split()
+    if not args:
+        await message.answer("Использование: /panelclients <server_id>")
+        return
+    try:
+        server_id = int(args[0])
+    except ValueError:
+        await message.answer("server_id должен быть числом")
+        return
+    server = await ServerRepository(session).get_by_id(server_id)
+    if server is None:
+        await message.answer("Сервер не найден")
+        return
+    try:
+        clients = await provisioning.list_panel_clients(
+            server, timeout=float(settings.xui_request_timeout)
+        )
+    except PanelUpdateError as exc:
+        await message.answer(f"Ошибка панели: {exc}")
+        return
+    await message.answer(texts.admin_panel_clients(server_id, clients))
+
+
+@router.message(Command("bind"))
+async def bind_panel_client(
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    args = (command.args or "").split()
+    if len(args) < 3:
+        await message.answer(
+            "Формат: /bind <server_id> <email> <telegram_id>\n"
+            "email — имя клиента в панели (см. /panelclients), "
+            "telegram_id — пользователь, который уже запустил бота.\n"
+            "Привязывает существующего клиента панели к боту и включает продление."
+        )
+        return
+    try:
+        server_id = int(args[0])
+        telegram_id = int(args[2])
+    except ValueError:
+        await message.answer("server_id и telegram_id должны быть числами")
+        return
+    email = args[1]
+    server = await ServerRepository(session).get_by_id(server_id)
+    if server is None:
+        await message.answer("Сервер не найден")
+        return
+    target = await UserRepository(session).get_by_telegram_id(telegram_id)
+    if target is None:
+        await message.answer(
+            "Пользователь не найден. Попросите его сначала запустить бота (/start)."
+        )
+        return
+    try:
+        result = await provisioning.bind_existing_client(
+            session,
+            server,
+            email,
+            target,
+            _get_updater(settings),
+            timeout=float(settings.xui_request_timeout),
+        )
+    except PanelUpdateError as exc:
+        await session.rollback()
+        await message.answer(f"Не удалось привязать: {exc}")
+        return
+    await session.commit()
+    logger.info(
+        "Админ tg=%s привязал клиента %s сервера #%s к user tg=%s",
+        message.from_user.id if message.from_user else "?",
+        email,
+        server_id,
+        telegram_id,
+    )
+    await message.answer(texts.admin_bind_result(result))
 
 
 @router.message(Command("active"))

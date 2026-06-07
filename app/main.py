@@ -6,7 +6,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ErrorEvent
+from aiogram.types import BotCommand, ErrorEvent, MenuButtonCommands
 from aiogram.utils.token import TokenValidationError, validate_token
 
 from app.bot.middlewares import DbSessionMiddleware
@@ -14,7 +14,7 @@ from app.bot.router import build_root_router
 from app.config import Settings, get_settings
 from app.db.session import get_sessionmaker
 from app.logging_config import setup_logging
-from app.services import antishare
+from app.services import antishare, expiry, health
 from app.services.ip_provider import build_ip_provider
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,44 @@ async def _anti_sharing_poller(settings: Settings) -> None:
             logger.info("Антишеринг: собрано наблюдений: %s", added)
         except Exception:  # noqa: BLE001 - фоновая задача не должна падать
             logger.exception("Ошибка фонового сбора IP")
+
+
+async def _server_health_poller(settings: Settings) -> None:
+    """Фоновая периодическая проверка доступности серверов 3x-ui."""
+    interval = settings.server_health_poll_seconds
+    timeout = min(float(settings.xui_request_timeout), 10.0)
+    sessionmaker = get_sessionmaker()
+    while True:
+        try:
+            async with sessionmaker() as session:
+                await health.check_servers(session, timeout=timeout)
+        except Exception:  # noqa: BLE001 - фоновая задача не должна падать
+            logger.exception("Ошибка фоновой проверки серверов")
+        await asyncio.sleep(interval)
+
+
+async def _expiry_notify_poller(bot: Bot, settings: Settings) -> None:
+    """Фоновая рассылка уведомлений об окончании подписки (день/час/в момент)."""
+    interval = settings.expiry_notify_poll_seconds
+    sessionmaker = get_sessionmaker()
+    while True:
+        try:
+            async with sessionmaker() as session:
+                await expiry.process_expiry_notifications(session, bot)
+        except Exception:  # noqa: BLE001 - фоновая задача не должна падать
+            logger.exception("Ошибка фоновых уведомлений об окончании подписки")
+        await asyncio.sleep(interval)
+
+
+async def _setup_menu_button(bot: Bot) -> None:
+    """Включает кнопку «Меню» у поля ввода с командой /start (возврат в начало)."""
+    try:
+        await bot.set_my_commands(
+            [BotCommand(command="start", description="Главное меню / в начало")]
+        )
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    except Exception:  # noqa: BLE001 - не критично для запуска бота
+        logger.exception("Не удалось настроить кнопку «Меню»")
 
 
 def build_dispatcher() -> Dispatcher:
@@ -102,21 +140,37 @@ async def run() -> None:
     )
     dp = build_dispatcher()
 
+    await _setup_menu_button(bot)
+
     logger.info("Бот запускается (admins=%s)", settings.admin_telegram_ids)
 
-    poller_task: asyncio.Task | None = None
+    background_tasks: list[asyncio.Task] = []
     if settings.anti_sharing_enabled and settings.anti_sharing_poll_minutes > 0:
-        poller_task = asyncio.create_task(_anti_sharing_poller(settings))
+        background_tasks.append(asyncio.create_task(_anti_sharing_poller(settings)))
         logger.info(
             "Антишеринг-мониторинг включён, период сбора: %s мин",
             settings.anti_sharing_poll_minutes,
+        )
+    if settings.server_health_poll_seconds > 0:
+        background_tasks.append(asyncio.create_task(_server_health_poller(settings)))
+        logger.info(
+            "Проверка доступности серверов включена, период: %s c",
+            settings.server_health_poll_seconds,
+        )
+    if settings.expiry_notify_poll_seconds > 0:
+        background_tasks.append(
+            asyncio.create_task(_expiry_notify_poller(bot, settings))
+        )
+        logger.info(
+            "Уведомления об окончании подписки включены, период: %s c",
+            settings.expiry_notify_poll_seconds,
         )
 
     try:
         await dp.start_polling(bot)
     finally:
-        if poller_task is not None:
-            poller_task.cancel()
+        for task in background_tasks:
+            task.cancel()
         await bot.session.close()
 
 
