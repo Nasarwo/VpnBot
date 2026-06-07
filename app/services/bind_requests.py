@@ -61,7 +61,6 @@ async def create_request(
         subscription_link=subscription_link.strip(),
         public_id=public_id,
     )
-    user.onboarding_done = True
     await audit.record(
         session,
         action="bind_request.created",
@@ -161,6 +160,9 @@ async def reject_request(
     req.status = BindRequestStatus.REJECTED
     req.admin_comment = comment
     req.processed_at = now
+    user = req.user
+    if user is not None:
+        user.onboarding_done = False
     await audit.record(
         session,
         action="bind_request.rejected",

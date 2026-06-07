@@ -12,6 +12,8 @@ from app.services.xui_payloads import (
     build_client_object,
     build_client_record,
     client_identifier,
+    client_record_body,
+    merge_client_record_for_update,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,23 +76,40 @@ class XuiPanelUpdater:
         flow: str | None,
         expiry_ms: int,
     ) -> None:
-        # Объект клиента собираем сами (а не из ответа get): ответ /clients/get
-        # отдаёт ClientRecord (id — числовой DB-ключ), а update ожидает
-        # model.Client (id — строковый UUID). id/password/auth стабильны
-        # (external_client_id), поэтому объект идентичен для create и update.
-        client_obj = build_client_record(
-            client_uuid=spec.client_uuid,
-            password=spec.password,
+        existing_record = await client.get_client_record(spec.email)
+        if existing_record is None:
+            client_obj = build_client_record(
+                client_uuid=spec.client_uuid,
+                password=spec.password,
+                email=spec.email,
+                sub_id=spec.sub_id,
+                expiry_ms=expiry_ms,
+                flow=flow,
+            )
+            await client.create_client_record(client_obj, inbound_ids)
+            return
+
+        existing_body = client_record_body(existing_record)
+        if existing_body is None:
+            raise XuiError(
+                f"Некорректный ответ панели для клиента {spec.email}"
+            )
+        client_obj = merge_client_record_for_update(
+            existing_body,
             email=spec.email,
             sub_id=spec.sub_id,
             expiry_ms=expiry_ms,
             flow=flow,
         )
-        existing = await client.get_client_record(spec.email)
-        if existing is None:
-            await client.create_client_record(client_obj, inbound_ids)
-        else:
-            await client.update_client_record(spec.email, client_obj)
+        existing_inbound_ids = [
+            int(i)
+            for i in (existing_record.get("inboundIds") or [])
+            if isinstance(i, int)
+        ]
+        merged_inbound_ids = sorted(set(existing_inbound_ids) | set(inbound_ids))
+        await client.update_client_record(
+            spec.email, client_obj, inbound_ids=merged_inbound_ids
+        )
 
     async def _provision_legacy(
         self, client: XuiClient, spec: ServerProvision, expiry_ms: int
@@ -135,14 +154,18 @@ class XuiPanelUpdater:
         async with self._client(server) as client:
             try:
                 if await client.supports_clients_api():
-                    existing = await client.get_client_record(mapping.email)
-                    if existing is None:
+                    existing_record = await client.get_client_record(mapping.email)
+                    if existing_record is None:
                         raise XuiError(
                             f"Клиент {mapping.email} не найден на панели"
                         )
-                    client_obj = build_client_record(
-                        client_uuid=mapping.client_uuid,
-                        password=mapping.client_uuid,
+                    existing_body = client_record_body(existing_record)
+                    if existing_body is None:
+                        raise XuiError(
+                            f"Некорректный ответ панели для клиента {mapping.email}"
+                        )
+                    client_obj = merge_client_record_for_update(
+                        existing_body,
                         email=mapping.email,
                         sub_id=mapping.sub_id or mapping.email,
                         expiry_ms=expiry_ms,

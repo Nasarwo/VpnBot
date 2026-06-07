@@ -58,7 +58,31 @@ async def test_create_bind_request(session: AsyncSession):
     assert pending is not None
     assert pending.public_id == "LEGACY42"
     assert pending.request_code.startswith("BIND-")
-    assert user.onboarding_done is True
+    assert user.onboarding_done is False
+
+
+async def test_reject_bind_request_resets_onboarding(session: AsyncSession):
+    user = User(telegram_id=555003, onboarding_done=False)
+    session.add(user)
+    await session.commit()
+
+    req = await bind_requests.create_request(
+        session, user, "https://panel.example:2096/sub/LEGACY42"
+    )
+    assert user.onboarding_done is False
+
+    user.onboarding_done = True
+    await session.commit()
+
+    rejected = await bind_requests.reject_request(
+        session, req.id, actor_user_id=None
+    )
+    await session.refresh(user)
+
+    assert rejected.status.value == "rejected"
+    assert user.onboarding_done is False
+    repo = BindRequestRepository(session)
+    assert await repo.latest_waiting_for_user(user.id) is None
 
 
 async def test_create_bind_request_rejects_invalid_link(session: AsyncSession):
