@@ -21,6 +21,11 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite+aiosqlite:///./vpnbot.sqlite3"
 
+    # Ключ для шифрования секретов в БД (пароли панелей). Произвольная строка;
+    # из неё выводится ключ Fernet. Пусто — секреты хранятся в открытом виде
+    # (только для разработки). В проде задайте стойкое случайное значение.
+    secret_key: str = ""
+
     payment_amount_rub: int = 175
     payment_period_days: int = 30
     trial_period_days: int = 3

@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot import keyboards, notify, texts
+from app.bot import keyboards, notify, texts, ui
 from app.bot.callbacks import MenuCallback, OnboardCallback, PlanCallback
 from app.bot.states import OnboardingStates, ProofStates
 from app.config import Settings
@@ -77,14 +77,14 @@ async def _send_welcome(message: Message, db_user: User, client: VpnClient | Non
 async def _edit(callback: CallbackQuery, text: str, markup) -> None:
     """Редактирует текущее сообщение (без спама в чат). При сбое — отправляет новое."""
     try:
-        await callback.message.edit_text(
+        await ui.edit(callback,
             text, reply_markup=markup, parse_mode="HTML"
         )
     except TelegramBadRequest as exc:
         # "message is not modified" игнорируем; иначе отправляем новое сообщение.
         if "message is not modified" in str(exc).lower():
             return
-        await callback.message.answer(text, reply_markup=markup, parse_mode="HTML")
+        await ui.answer(callback, text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.message(CommandStart())
@@ -411,7 +411,11 @@ async def _activate_trial(
         text = texts.trial_failed()
     else:
         client = await VpnClientRepository(session).get_for_user(db_user.id)
-        text = texts.trial_granted(client, settings.trial_period_days)
+        text = (
+            texts.trial_granted(client, settings.trial_period_days)
+            if client is not None
+            else texts.trial_failed()
+        )
     await _edit(callback, text, keyboards.back_keyboard("home"))
     await callback.answer()
 
@@ -466,6 +470,8 @@ async def proof_photo(
     settings: Settings,
     state: FSMContext,
 ) -> None:
+    if not message.photo:
+        return
     file_id = message.photo[-1].file_id
     await _attach_and_notify(
         message, session, db_user, settings, state,
@@ -481,6 +487,8 @@ async def proof_document(
     settings: Settings,
     state: FSMContext,
 ) -> None:
+    if message.document is None:
+        return
     file_id = message.document.file_id
     await _attach_and_notify(
         message, session, db_user, settings, state,

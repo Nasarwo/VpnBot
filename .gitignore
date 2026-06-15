@@ -16,6 +16,16 @@ env/
 *.env
 !.env.example
 
+# Local dumps / panel artifacts / debug junk (must never be committed:
+# may contain live 3x-ui session cookies, client UUIDs/emails, traffic data)
+*.txt
+!requirements*.txt
+*.html
+*.log
+list.json
+cj*.txt
+panel_*.html
+
 # Databases
 *.sqlite3
 *.db

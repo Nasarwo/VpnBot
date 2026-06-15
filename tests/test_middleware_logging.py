@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from aiogram.types import CallbackQuery, Chat, Message, User as TgUser
+from aiogram.types import CallbackQuery, Chat, Message
+from aiogram.types import User as TgUser
 
 from app.bot.middlewares import _describe_event
 

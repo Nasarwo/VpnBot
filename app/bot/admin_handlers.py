@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot import keyboards, notify, texts
+from app.bot import keyboards, notify, texts, ui
 from app.bot.callbacks import AdminCallback, BindCallback, PaymentCallback
 from app.bot.filters import IsAdmin
 from app.bot.states import AdminStates
@@ -109,7 +109,7 @@ async def _edit_panel(
     parse_mode="HTML" — там, где в тексте есть разметка (например, <code> в заявках).
     """
     try:
-        await callback.message.edit_text(
+        await ui.edit(callback,
             text, reply_markup=markup, parse_mode=parse_mode
         )
     except TelegramBadRequest:
@@ -188,6 +188,7 @@ async def admin_nav(
         server.enabled = not server.enabled
         await session.commit()
         server = await repo.get_with_inbounds(sid)
+        assert server is not None
         await _edit_panel(
             callback, texts.admin_server_detail(server),
             keyboards.admin_server_keyboard(server),
@@ -209,6 +210,7 @@ async def admin_nav(
             return
         await session.commit()
         server = await repo.get_with_inbounds(sid)
+        assert server is not None
         await _edit_panel(
             callback,
             texts.admin_import_inbounds(sid, summary)
@@ -327,8 +329,8 @@ async def admin_add_server_line(
     settings: Settings,
 ) -> None:
     server, error = _parse_server_line(message.text or "")
-    if error is not None:
-        await message.answer(error + "\n\nИли отправьте /cancel.")
+    if server is None:
+        await message.answer((error or "Некорректный ввод") + "\n\nИли отправьте /cancel.")
         return
     text = await _finalize_new_server(session, server, settings)
     await state.clear()
@@ -400,11 +402,14 @@ async def on_bind_action(
             await callback.answer(str(exc), show_alert=True)
             return
         full = await bind_repo.get_by_id_with_user(request_id)
-        if full is not None and full.user is not None:
-            await notify.notify_user_bind_rejected(
-                callback.bot, full.user.telegram_id, full.request_code
-            )
-        await callback.message.edit_text(
+        if full is None or full.user is None:
+            await callback.answer("Привязка отклонена")
+            return
+        await notify.notify_user_bind_rejected(
+            callback.bot, full.user.telegram_id, full.request_code
+        )
+        await ui.edit(
+            callback,
             f"Привязка отклонена.\n\n{texts.admin_bind_card(full, full.user)}",
             parse_mode="HTML",
         )
@@ -438,7 +443,7 @@ async def on_bind_action(
             await notify.notify_user_bind_approved(
                 callback.bot, full.user.telegram_id, full.public_id
             )
-            await callback.message.edit_text(
+            await ui.edit(callback,
                 f"Готово. Аккаунт привязан.\n\n"
                 f"{texts.admin_bind_card(full, full.user)}",
                 parse_mode="HTML",
@@ -453,7 +458,7 @@ async def on_bind_action(
         card = texts.admin_bind_card(full, full.user)
         if full.last_error:
             card += f"\n\nОшибка: {escape(full.last_error)}"
-        await callback.message.edit_text(
+        await ui.edit(callback,
             f"Ошибка привязки.\n\n{card}",
             reply_markup=keyboards.admin_bind_retry_keyboard(request_id),
             parse_mode="HTML",
@@ -488,7 +493,7 @@ async def on_payment_action(
             await callback.answer("Заявка не найдена", show_alert=True)
             return
         history = await pay_repo.history_for_user(payment.user_id)
-        await callback.message.answer(
+        await ui.answer(callback,
             texts.admin_history(history), parse_mode="HTML"
         )
         await callback.answer()
@@ -500,7 +505,7 @@ async def on_payment_action(
             await callback.answer("Заявка не найдена", show_alert=True)
             return
         client = await VpnClientRepository(session).get_for_user(payment.user_id)
-        await callback.message.answer(texts.admin_profile(payment.user, client))
+        await ui.answer(callback, texts.admin_profile(payment.user, client))
         await callback.answer()
         return
 
@@ -509,11 +514,14 @@ async def on_payment_action(
             session, payment_id, actor_user_id=db_user.id
         )
         payment = await pay_repo.get_by_id_with_relations(payment_id)
-        if payment is not None:
-            await notify.notify_user_rejected(
-                callback.bot, payment.user.telegram_id, payment.payment_code
-            )
-        await callback.message.edit_text(
+        if payment is None or payment.user is None:
+            await callback.answer("Заявка отклонена")
+            return
+        await notify.notify_user_rejected(
+            callback.bot, payment.user.telegram_id, payment.payment_code
+        )
+        await ui.edit(
+            callback,
             f"Заявка отклонена.\n\n{texts.admin_payment_card(payment, payment.user)}",
             parse_mode="HTML",
         )
@@ -546,7 +554,7 @@ async def on_payment_action(
                     client,
                     first_purchase=result.first_purchase,
                 )
-            await callback.message.edit_text(
+            await ui.edit(callback,
                 f"Готово. Доступ продлён.\n\n"
                 f"{texts.admin_payment_card(payment, payment.user)}",
                 parse_mode="HTML",
@@ -558,7 +566,7 @@ async def on_payment_action(
             await notify.notify_admins_failed(
                 callback.bot, settings, payment, payment.user
             )
-            await callback.message.edit_text(
+            await ui.edit(callback,
                 f"Ошибка применения.\n\n"
                 f"{texts.admin_payment_card(payment, payment.user)}",
                 reply_markup=keyboards.admin_retry_keyboard(payment_id),
@@ -849,8 +857,8 @@ async def add_server(
         )
         return
     server, error = _parse_server_line(raw)
-    if error is not None:
-        await message.answer(error)
+    if server is None:
+        await message.answer(error or "Некорректный ввод")
         return
     text = await _finalize_new_server(session, server, settings)
     await message.answer(text)

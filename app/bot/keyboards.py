@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from aiogram.types import (
     CopyTextButton,
     InlineKeyboardButton,
@@ -37,7 +39,7 @@ def _btn(
     icon: str | None = None,
 ) -> InlineKeyboardButton:
     """Строит кнопку с цветом (style) и анимированным значком (icon)."""
-    kwargs: dict[str, object] = {"text": text}
+    kwargs: dict[str, Any] = {"text": text}
     if callback_data is not None:
         kwargs["callback_data"] = callback_data
     if copy is not None:

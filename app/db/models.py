@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     BigInteger,
@@ -24,6 +24,12 @@ from app.db.enums import (
     Protocol,
     UserRole,
 )
+from app.db.types import EncryptedString
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC. Замена deprecated datetime.utcnow() (naive)."""
+    return datetime.now(tz=UTC)
 
 
 class User(Base, TimestampMixin):
@@ -100,7 +106,9 @@ class Server(Base):
     country: Mapped[str | None] = mapped_column(String(64), nullable=True)
     panel_url: Mapped[str] = mapped_column(String(512), nullable=False)
     username: Mapped[str] = mapped_column(String(255), nullable=False)
-    password: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Шифруется прозрачно при наличии SECRET_KEY (см. EncryptedString / app.crypto).
+    # Колонка расширена до 512, т.к. шифротекст длиннее исходного пароля.
+    password: Mapped[str] = mapped_column(EncryptedString(512), nullable=False)
     # Тип сервера для отображения: direct (зарубежный exit) / ru_proxy (RU-вход) и т.п.
     kind: Mapped[str] = mapped_column(
         String(16), default="direct", nullable=False, server_default="direct"
@@ -114,7 +122,7 @@ class Server(Base):
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+        DateTime(timezone=True), nullable=False, default=_utcnow
     )
 
     mappings: Mapped[list[ClientServerMapping]] = relationship(
@@ -212,7 +220,7 @@ class PaymentRequest(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+        DateTime(timezone=True), nullable=False, default=_utcnow
     )
     confirmed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -246,7 +254,7 @@ class PaymentAttachment(Base):
     )
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+        DateTime(timezone=True), nullable=False, default=_utcnow
     )
 
     payment_request: Mapped[PaymentRequest] = relationship(
@@ -277,7 +285,7 @@ class BindRequest(Base):
     admin_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+        DateTime(timezone=True), nullable=False, default=_utcnow
     )
     processed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -299,7 +307,7 @@ class IpObservation(Base):
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     ip: Mapped[str] = mapped_column(String(64), nullable=False)
     observed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=datetime.utcnow, index=True
+        DateTime(timezone=True), nullable=False, default=_utcnow, index=True
     )
 
 
@@ -315,5 +323,5 @@ class AuditLog(Base):
     entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     payload: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+        DateTime(timezone=True), nullable=False, default=_utcnow
     )

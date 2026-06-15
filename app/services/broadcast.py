@@ -18,7 +18,7 @@ class BroadcastResult:
 
 
 async def send_broadcast(
-    bot: Bot,
+    bot: Bot | None,
     telegram_ids: list[int],
     text: str,
     *,
@@ -30,6 +30,8 @@ async def send_broadcast(
     текст администратора не ломал разметку. Ошибки доставки отдельным
     пользователям не прерывают рассылку; учитывается лимит частоты Telegram.
     """
+    if bot is None:
+        return BroadcastResult(total=len(telegram_ids), sent=0, failed=0)
     sent = 0
     failed = 0
     for tid in telegram_ids:

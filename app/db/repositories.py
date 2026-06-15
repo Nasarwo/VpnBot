@@ -337,6 +337,23 @@ class PaymentRepository:
     async def get_by_id(self, payment_id: int) -> PaymentRequest | None:
         return await self.session.get(PaymentRequest, payment_id)
 
+    async def get_by_id_for_update(
+        self, payment_id: int
+    ) -> PaymentRequest | None:
+        """Берёт заявку с блокировкой строки (SELECT ... FOR UPDATE).
+
+        На Postgres сериализует параллельные подтверждения одной заявки —
+        защита от двойного применения при двойном клике/ретрае админа. На
+        SQLite FOR UPDATE не поддерживается и тихо игнорируется (там запись
+        и так сериализуется глобальной блокировкой на коммите).
+        """
+        result = await self.session.execute(
+            select(PaymentRequest)
+            .where(PaymentRequest.id == payment_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_id_with_relations(
         self, payment_id: int
     ) -> PaymentRequest | None:

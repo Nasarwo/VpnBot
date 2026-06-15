@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -132,7 +133,7 @@ async def prune_old(
         delete(IpObservation).where(IpObservation.observed_at < cutoff)
     )
     await session.flush()
-    return int(result.rowcount or 0)
+    return int(cast("CursorResult[object]", result).rowcount or 0)
 
 
 async def collect_for_client(

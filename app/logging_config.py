@@ -23,8 +23,8 @@ def setup_logging(level: str = "INFO", xui_debug: bool = False) -> None:
         handler.setFormatter(logging.Formatter(_FORMAT))
         root.addHandler(handler)
     else:
-        for handler in root.handlers:
-            handler.setFormatter(logging.Formatter(_FORMAT))
+        for existing in root.handlers:
+            existing.setFormatter(logging.Formatter(_FORMAT))
 
     logging.getLogger("app").setLevel(resolved)
     logging.getLogger("__main__").setLevel(resolved)

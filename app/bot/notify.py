@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from html import escape
 
 from aiogram import Bot
@@ -14,8 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 async def notify_admins_new_request(
-    bot: Bot, settings: Settings, payment: PaymentRequest, user: User
+    bot: Bot | None, settings: Settings, payment: PaymentRequest, user: User
 ) -> None:
+    if bot is None:
+        return
     card = texts.admin_payment_card(payment, user)
     keyboard = keyboards.admin_payment_keyboard(payment.id)
     for admin_id in settings.admin_telegram_ids:
@@ -28,13 +31,15 @@ async def notify_admins_new_request(
 
 
 async def forward_proof_to_admins(
-    bot: Bot,
+    bot: Bot | None,
     settings: Settings,
     payment: PaymentRequest,
     file_type: str,
     telegram_file_id: str | None,
     caption: str | None,
 ) -> None:
+    if bot is None:
+        return
     header = f"Подтверждение по заявке <code>{escape(payment.payment_code)}</code>"
     for admin_id in settings.admin_telegram_ids:
         try:
@@ -54,12 +59,14 @@ async def forward_proof_to_admins(
 
 
 async def notify_user_extended(
-    bot: Bot,
+    bot: Bot | None,
     telegram_id: int,
     client: VpnClient,
     *,
     first_purchase: bool = False,
 ) -> None:
+    if bot is None:
+        return
     try:
         await bot.send_message(
             telegram_id, texts.access_extended(client), parse_mode="HTML"
@@ -71,7 +78,9 @@ async def notify_user_extended(
         await notify_first_purchase_channel(bot, telegram_id)
 
 
-async def notify_first_purchase_channel(bot: Bot, telegram_id: int) -> None:
+async def notify_first_purchase_channel(bot: Bot | None, telegram_id: int) -> None:
+    if bot is None:
+        return
     try:
         await bot.send_message(
             telegram_id,
@@ -86,9 +95,11 @@ async def notify_first_purchase_channel(bot: Bot, telegram_id: int) -> None:
 
 
 async def notify_user_expiry(
-    bot: Bot, telegram_id: int, stage: int, expires_at: object
+    bot: Bot | None, telegram_id: int, stage: int, expires_at: datetime | None
 ) -> bool:
     """Уведомление пользователя об окончании подписки. True — если доставлено."""
+    if bot is None:
+        return False
     try:
         await bot.send_message(
             telegram_id, texts.expiry_notice(stage, expires_at), parse_mode="HTML"
@@ -103,8 +114,10 @@ async def notify_user_expiry(
 
 
 async def notify_admins_new_bind_request(
-    bot: Bot, settings: Settings, req: BindRequest, user: User
+    bot: Bot | None, settings: Settings, req: BindRequest, user: User
 ) -> None:
+    if bot is None:
+        return
     card = texts.admin_bind_card(req, user)
     keyboard = keyboards.admin_bind_keyboard(req.id)
     for admin_id in settings.admin_telegram_ids:
@@ -117,8 +130,10 @@ async def notify_admins_new_bind_request(
 
 
 async def notify_user_bind_approved(
-    bot: Bot, telegram_id: int, public_id: str
+    bot: Bot | None, telegram_id: int, public_id: str
 ) -> None:
+    if bot is None:
+        return
     try:
         await bot.send_message(
             telegram_id, texts.bind_request_approved(public_id), parse_mode="HTML"
@@ -128,8 +143,10 @@ async def notify_user_bind_approved(
 
 
 async def notify_user_bind_rejected(
-    bot: Bot, telegram_id: int, request_code: str
+    bot: Bot | None, telegram_id: int, request_code: str
 ) -> None:
+    if bot is None:
+        return
     try:
         await bot.send_message(
             telegram_id,
@@ -142,8 +159,10 @@ async def notify_user_bind_rejected(
 
 
 async def notify_admins_bind_failed(
-    bot: Bot, settings: Settings, req: BindRequest, user: User
+    bot: Bot | None, settings: Settings, req: BindRequest, user: User
 ) -> None:
+    if bot is None:
+        return
     card = texts.admin_bind_card(req, user)
     if req.last_error:
         card += f"\n\nОшибка: {escape(req.last_error)}"
@@ -161,8 +180,10 @@ async def notify_admins_bind_failed(
 
 
 async def notify_user_rejected(
-    bot: Bot, telegram_id: int, payment_code: str
+    bot: Bot | None, telegram_id: int, payment_code: str
 ) -> None:
+    if bot is None:
+        return
     try:
         await bot.send_message(
             telegram_id, texts.payment_rejected(payment_code), parse_mode="HTML"
@@ -172,8 +193,10 @@ async def notify_user_rejected(
 
 
 async def notify_admins_failed(
-    bot: Bot, settings: Settings, payment: PaymentRequest, user: User
+    bot: Bot | None, settings: Settings, payment: PaymentRequest, user: User
 ) -> None:
+    if bot is None:
+        return
     card = texts.admin_payment_card(payment, user)
     keyboard = keyboards.admin_retry_keyboard(payment.id)
     for admin_id in settings.admin_telegram_ids:

@@ -715,7 +715,7 @@ def admin_broadcast_result(total: int, sent: int, failed: int) -> str:
     )
 
 
-def _fmt_expiry_ms(expiry_ms: object) -> str:
+def _fmt_expiry_ms(expiry_ms: int | str | float | None) -> str:
     try:
         ms = int(expiry_ms or 0)
     except (TypeError, ValueError):
