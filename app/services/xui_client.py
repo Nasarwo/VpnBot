@@ -248,13 +248,11 @@ class XuiClient:
         )
         if response.status_code != 200:
             server_hdr = response.headers.get("server", "")
-            snippet = response.text[:200].replace("\n", " ")
             logger.warning(
-                "Авторизация в панели %s: HTTP %s (server=%r). Тело: %s",
+                "Авторизация в панели %s: HTTP %s (server=%r)",
                 self._base_url,
                 response.status_code,
                 server_hdr,
-                snippet,
             )
             raise XuiAuthError(
                 f"Ошибка авторизации в панели {self._base_url}: "
@@ -714,10 +712,11 @@ class XuiClient:
 
         Требует включённого логирования IP в панели. Если записей нет — вернёт [].
         """
+        encoded = _quote_path_segment(email)
         if await self.supports_clients_api():
-            path = f"/panel/api/clients/ips/{email}"
+            path = f"/panel/api/clients/ips/{encoded}"
         else:
-            path = f"/panel/api/inbounds/clientIps/{email}"
+            path = f"/panel/api/inbounds/clientIps/{encoded}"
         response = await self._api("POST", path)
         try:
             data = response.json()

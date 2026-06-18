@@ -62,17 +62,16 @@ def test_welcome_menu_install_has_icon():
 
 def test_free_proxies_keyboard_links():
     buttons = _all_buttons(keyboards.free_proxies_keyboard())
-    assert buttons[0].text == texts.BTN_PROXY_1_MTProto
-    assert buttons[0].url == texts.FREE_PROXY_1_MTPROTO_URL
+    assert len(buttons) == 3
+    assert buttons[0].text == texts.BTN_PROXY_MTPROTO
+    assert buttons[0].url == texts.FREE_PROXY_MTPROTO_URL
     assert buttons[0].icon_custom_emoji_id == emoji.custom_emoji_id("connect")
-    assert buttons[1].text == texts.BTN_PROXY_1_SOCKS5
-    assert buttons[1].url == texts.FREE_PROXY_1_SOCKS5_URL
+    assert buttons[1].text == texts.BTN_PROXY_SOCKS5
+    assert buttons[1].url == texts.FREE_PROXY_SOCKS5_URL
     assert buttons[1].icon_custom_emoji_id == emoji.custom_emoji_id("server")
-    assert buttons[2].text == texts.BTN_PROXY_2_MTProto
-    assert buttons[2].url == texts.FREE_PROXY_2_MTPROTO_URL
-    assert buttons[3].text == texts.BTN_PROXY_2_SOCKS5
-    assert buttons[3].url == texts.FREE_PROXY_2_SOCKS5_URL
-    assert buttons[4].text == texts.BTN_BACK
+    assert buttons[2].text == texts.BTN_BACK
+    assert all("nasarwo.pro" in (button.url or "") for button in buttons[:2])
+    assert all("mind-forge.tech" not in (button.url or "") for button in buttons)
 
 
 def test_welcome_menu_free_proxies_has_icon():
@@ -127,6 +126,49 @@ def test_cancel_payment_keyboard():
     assert buttons[0].text == texts.BTN_CANCEL
     assert buttons[0].style == "danger"
     assert MenuCallback.unpack(buttons[0].callback_data).action == "cancel_payment"
+
+
+def test_all_inline_buttons_have_color_style():
+    srv = Server(
+        id=1,
+        name="Server",
+        country="SE",
+        panel_url="http://x",
+        username="u",
+        password="p",
+        subscription_base="https://sub.example/sub/",
+        enabled=True,
+    )
+    markups = [
+        keyboards.back_keyboard("home"),
+        keyboards.cancel_payment_keyboard(),
+        keyboards.welcome_menu(True),
+        keyboards.welcome_menu(False),
+        keyboards.reset_bot_confirm_keyboard(),
+        keyboards.install_guides_keyboard(),
+        keyboards.free_proxies_keyboard(),
+        keyboards.news_channel_keyboard(),
+        keyboards.subscription_menu(),
+        keyboards.extend_plans_keyboard(),
+        keyboards.purchase_plans_keyboard(True),
+        keyboards.connection_keyboard([srv], "ABCD1234"),
+        keyboards.connection_keyboard([srv], None),
+        keyboards.admin_home_keyboard(),
+        keyboards.admin_servers_keyboard([srv]),
+        keyboards.admin_server_keyboard(srv),
+        keyboards.admin_confirm_delete_keyboard(1),
+        keyboards.admin_back_keyboard("home"),
+        keyboards.onboarding_legacy_keyboard(),
+        keyboards.admin_bind_keyboard(1),
+        keyboards.admin_bind_retry_keyboard(1),
+        keyboards.admin_payment_keyboard(1),
+        keyboards.admin_retry_keyboard(1),
+    ]
+
+    allowed = {"primary", "success", "danger"}
+    for markup in markups:
+        for button in _all_buttons(markup):
+            assert getattr(button, "style", None) in allowed, button.text
 
 
 async def test_cancel_payment_deletes_unsubmitted(
@@ -258,6 +300,27 @@ def test_connection_overview_status_icons():
 
 
 # --- Логика состояний ---
+
+def test_admin_panel_clients_supports_nested_client_api_records():
+    text = texts.admin_panel_clients(
+        7,
+        [
+            {
+                "client": {
+                    "email": "client@example",
+                    "subId": "SUB-1",
+                    "enable": False,
+                    "expiryTime": 0,
+                },
+                "inboundIds": [1, 2],
+            }
+        ],
+    )
+
+    assert "client@example" in text
+    assert "SUB-1" in text
+    assert "выкл" in text
+
 
 def test_is_active():
     assert _is_active(None) is False

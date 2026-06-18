@@ -13,4 +13,7 @@ RUN pip install --upgrade pip && pip install .
 
 COPY alembic.ini ./
 
+RUN addgroup --system app && adduser --system --ingroup app app
+USER app
+
 CMD ["sh", "-c", "alembic upgrade head && python -m app.main"]

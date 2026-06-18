@@ -58,6 +58,31 @@ async def test_trial_without_client(session: AsyncSession, user: User):
     assert refreshed_user.trial_used is False
 
 
+async def test_trial_with_unmapped_client_is_not_marked_used(
+    session: AsyncSession, user: User
+):
+    session.add(
+        VpnClient(
+            user_id=user.id,
+            display_name="Detached client",
+            email="detached",
+            is_active=False,
+        )
+    )
+    await session.commit()
+
+    result = await billing.grant_trial(
+        session, user_id=user.id, updater=MockPanelUpdater(), period_days=2
+    )
+    assert result.applied is False
+
+    refreshed_user = await UserRepository(session).get_by_id(user.id)
+    assert refreshed_user.trial_used is False
+    client = await VpnClientRepository(session).get_for_user(user.id)
+    assert client.expires_at is None
+    assert client.is_active is False
+
+
 async def test_trial_failure_can_be_retried(
     session: AsyncSession, user: User, vpn_client: VpnClient, server
 ):

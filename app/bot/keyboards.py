@@ -44,8 +44,7 @@ def _btn(
         kwargs["copy_text"] = CopyTextButton(text=copy)
     if url is not None:
         kwargs["url"] = url
-    if style is not None:
-        kwargs["style"] = style
+    kwargs["style"] = style or "primary"
     if icon is not None:
         emoji_id = custom_emoji_id(icon)
         if emoji_id:
@@ -181,28 +180,14 @@ def free_proxies_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 _btn(
-                    texts.BTN_PROXY_1_MTProto,
-                    url=texts.FREE_PROXY_1_MTPROTO_URL,
+                    texts.BTN_PROXY_MTPROTO,
+                    url=texts.FREE_PROXY_MTPROTO_URL,
                     style="primary",
                     icon="connect",
                 ),
                 _btn(
-                    texts.BTN_PROXY_1_SOCKS5,
-                    url=texts.FREE_PROXY_1_SOCKS5_URL,
-                    style="primary",
-                    icon="server",
-                ),
-            ],
-            [
-                _btn(
-                    texts.BTN_PROXY_2_MTProto,
-                    url=texts.FREE_PROXY_2_MTPROTO_URL,
-                    style="primary",
-                    icon="connect",
-                ),
-                _btn(
-                    texts.BTN_PROXY_2_SOCKS5,
-                    url=texts.FREE_PROXY_2_SOCKS5_URL,
+                    texts.BTN_PROXY_SOCKS5,
+                    url=texts.FREE_PROXY_SOCKS5_URL,
                     style="primary",
                     icon="server",
                 ),
@@ -420,17 +405,19 @@ def admin_bind_keyboard(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
+                _btn(
                     text="Привязать",
                     callback_data=BindCallback(
                         action="confirm", request_id=request_id
                     ).pack(),
+                    style="success",
                 ),
-                InlineKeyboardButton(
+                _btn(
                     text="Отклонить",
                     callback_data=BindCallback(
                         action="reject", request_id=request_id
                     ).pack(),
+                    style="danger",
                 ),
             ],
         ]
@@ -441,11 +428,12 @@ def admin_bind_retry_keyboard(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
+                _btn(
                     text="Повторить привязку",
                     callback_data=BindCallback(
                         action="retry", request_id=request_id
                     ).pack(),
+                    style="success",
                 )
             ]
         ]
@@ -456,27 +444,29 @@ def admin_payment_keyboard(payment_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
+                _btn(
                     text="Подтвердить",
                     callback_data=PaymentCallback(
                         action="confirm", payment_id=payment_id
                     ).pack(),
+                    style="success",
                 ),
-                InlineKeyboardButton(
+                _btn(
                     text="Отклонить",
                     callback_data=PaymentCallback(
                         action="reject", payment_id=payment_id
                     ).pack(),
+                    style="danger",
                 ),
             ],
             [
-                InlineKeyboardButton(
+                _btn(
                     text="История",
                     callback_data=PaymentCallback(
                         action="history", payment_id=payment_id
                     ).pack(),
                 ),
-                InlineKeyboardButton(
+                _btn(
                     text="Профиль",
                     callback_data=PaymentCallback(
                         action="profile", payment_id=payment_id
@@ -491,11 +481,12 @@ def admin_retry_keyboard(payment_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
+                _btn(
                     text="Повторить применение",
                     callback_data=PaymentCallback(
                         action="retry", payment_id=payment_id
                     ).pack(),
+                    style="success",
                 )
             ]
         ]

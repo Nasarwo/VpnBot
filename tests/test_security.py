@@ -171,6 +171,22 @@ def test_settings_admin_parsing_is_strict():
     assert s.is_admin(999) is False
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("xui_request_timeout", 0),
+        ("payment_period_days", 0),
+        ("trial_period_days", 0),
+        ("server_health_poll_seconds", -1),
+        ("expiry_notify_poll_seconds", -1),
+        ("anti_sharing_poll_minutes", -1),
+    ],
+)
+def test_settings_rejects_dangerous_numeric_values(field: str, value: int):
+    with pytest.raises(ValueError):
+        Settings(**{field: value})
+
+
 async def test_user_role_is_recomputed_from_settings(session: AsyncSession):
     """Роль не хранится «навсегда»: middleware пересчитывает её из настроек.
 

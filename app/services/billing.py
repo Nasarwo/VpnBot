@@ -448,16 +448,21 @@ async def grant_trial(
         )
     else:
         results = await _apply_panels(session, client, new_expiry, updater)
-    failed = [r for r in results if not r.ok]
+    eligible = await _count_eligible_mappings(session, client.id)
+    failed, empty_error = _evaluate_panel_results(
+        results,
+        targets_mode=targets,
+        eligible_mappings=eligible,
+    )
     logger.info(
         "grant_trial: user_id=%s новый срок=%s ок=%s ошибок=%s",
         user_id,
         new_expiry.isoformat(),
         sum(1 for r in results if r.ok),
-        len(failed),
+        len(failed) + (1 if empty_error else 0),
     )
 
-    if failed:
+    if empty_error or failed:
         return TrialResult(applied=False, failed_servers=failed)
 
     user.trial_used = True

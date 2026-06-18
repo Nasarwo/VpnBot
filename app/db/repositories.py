@@ -215,6 +215,7 @@ class ServerRepository:
             .where(Server.enabled.is_(True))
             .options(selectinload(Server.inbounds))
             .order_by(Server.id.asc())
+            .execution_options(populate_existing=True)
         )
         return list(result.scalars().all())
 

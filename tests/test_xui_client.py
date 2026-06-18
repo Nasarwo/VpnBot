@@ -267,6 +267,28 @@ async def test_get_client_traffic(httpx_mock: HTTPXMock):
     assert traffic == {"email": "e@local", "up": 10, "down": 20}
 
 
+async def test_get_client_ips_quotes_email_path_segment(httpx_mock: HTTPXMock):
+    _mock_csrf(httpx_mock)
+    httpx_mock.add_response(
+        method="POST", url=f"{BASE}/login", json={"success": True}
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{BASE}/panel/api/clients/get/__caps_probe__",
+        json={"success": False, "msg": "not found"},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/panel/api/clients/ips/e%40local%2Fwith-slash",
+        json={"success": True, "obj": ["1.1.1.1"]},
+    )
+    async with _client() as client:
+        assert await client.get_client_ips("e@local/with-slash") == ["1.1.1.1"]
+
+    requested_urls = [str(r.url) for r in httpx_mock.get_requests()]
+    assert f"{BASE}/panel/api/clients/ips/e%40local%2Fwith-slash" in requested_urls
+
+
 async def test_supports_clients_api_true(httpx_mock: HTTPXMock):
     _mock_csrf(httpx_mock)
     httpx_mock.add_response(

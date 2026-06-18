@@ -24,6 +24,7 @@ from app.db.enums import (
     Protocol,
     UserRole,
 )
+from app.db.types import EncryptedString
 
 
 class User(Base, TimestampMixin):
@@ -100,7 +101,7 @@ class Server(Base):
     country: Mapped[str | None] = mapped_column(String(64), nullable=True)
     panel_url: Mapped[str] = mapped_column(String(512), nullable=False)
     username: Mapped[str] = mapped_column(String(255), nullable=False)
-    password: Mapped[str] = mapped_column(String(255), nullable=False)
+    password: Mapped[str] = mapped_column(EncryptedString(1024), nullable=False)
     # Тип сервера для отображения: direct (зарубежный exit) / ru_proxy (RU-вход) и т.п.
     kind: Mapped[str] = mapped_column(
         String(16), default="direct", nullable=False, server_default="direct"

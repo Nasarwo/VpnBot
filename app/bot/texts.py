@@ -24,10 +24,8 @@ BTN_ONBOARD_YES = "Да, была подписка"
 BTN_ONBOARD_NO = "Нет, я новый пользователь"
 BTN_GUIDE_WINDOWS = "Windows"
 BTN_GUIDE_ANDROID_IOS = "Android & IOS"
-BTN_PROXY_1_MTProto = "#1 — MTProto"
-BTN_PROXY_1_SOCKS5 = "#1 — SOCKS5"
-BTN_PROXY_2_MTProto = "#2 — MTProto"
-BTN_PROXY_2_SOCKS5 = "#2 — SOCKS5"
+BTN_PROXY_MTPROTO = "MTProto"
+BTN_PROXY_SOCKS5 = "SOCKS5"
 
 INSTALL_GUIDE_WINDOWS_URL = (
     "https://telegra.ph/Gajd-po-podklyucheniyu-Windows--07062026-06-07"
@@ -39,19 +37,11 @@ INSTALL_GUIDE_ANDROID_IOS_URL = (
 NEWS_CHANNEL_URL = "https://t.me/+FJMJEtjqREU3ODQy"
 BTN_NEWS_CHANNEL = "Подписаться на канал"
 
-FREE_PROXY_1_MTPROTO_URL = (
-    "https://t.me/proxy?server=mind-forge.tech&port=4430"
-    "&secret=eeeb8adbf3edbf33bc3ec8598fff8925686d696e642d666f7267652e74656368"
-)
-FREE_PROXY_1_SOCKS5_URL = (
-    "https://t.me/socks?server=mind-forge.tech&port=1080"
-    "&user=mindforge&pass=lsNLects99bHHZkAPa8VncEw"
-)
-FREE_PROXY_2_MTPROTO_URL = (
+FREE_PROXY_MTPROTO_URL = (
     "https://t.me/proxy?server=nasarwo.pro&port=4430"
     "&secret=ee3bd225a4e7ff0a76e932ec2f63ab89676e61736172776f2e70726f"
 )
-FREE_PROXY_2_SOCKS5_URL = (
+FREE_PROXY_SOCKS5_URL = (
     "https://t.me/socks?server=nasarwo.pro&port=1080"
     "&user=nasarwo&pass=nasarwo_socks"
 )
@@ -733,10 +723,11 @@ def admin_panel_clients(server_id: int, clients: list, limit: int = 50) -> str:
     total = len(clients)
     lines = [f"Клиенты панели сервера #{server_id} (всего {total}):"]
     for c in clients[:limit]:
-        email = c.get("email") or "—"
-        sub = c.get("subId") or "—"
-        state = "вкл" if c.get("enable", True) else "выкл"
-        exp = _fmt_expiry_ms(c.get("expiryTime"))
+        body = c.get("client") if isinstance(c.get("client"), dict) else c
+        email = body.get("email") or "—"
+        sub = body.get("subId") or "—"
+        state = "вкл" if body.get("enable", True) else "выкл"
+        exp = _fmt_expiry_ms(body.get("expiryTime"))
         lines.append(f"  {email} | subId={sub} | {state} | до {exp}")
     if total > limit:
         lines.append(f"  …и ещё {total - limit}")

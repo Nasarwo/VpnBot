@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     )
 
     bot_token: str = ""
-    admin_telegram_ids: Annotated[list[int], NoDecode] = []
+    admin_telegram_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
 
     database_url: str = "sqlite+aiosqlite:///./vpnbot.sqlite3"
 
@@ -26,16 +26,16 @@ class Settings(BaseSettings):
     # (только для разработки). В проде задайте стойкое случайное значение.
     secret_key: str = ""
 
-    payment_amount_rub: int = 175
-    payment_period_days: int = 30
-    trial_period_days: int = 3
+    payment_amount_rub: int = Field(default=175, ge=1)
+    payment_period_days: int = Field(default=30, ge=1, le=3660)
+    trial_period_days: int = Field(default=3, ge=1, le=365)
     payment_details_text: str = (
         "<code>+70000000000</code> (банк по СБП)\n"
         "<code>0000 0000 0000 0000</code> (банк на карту)"
     )
     support_contact: str = "@support"
 
-    xui_request_timeout: int = 15
+    xui_request_timeout: int = Field(default=15, ge=1, le=120)
 
     # Уровень логирования приложения: DEBUG/INFO/WARNING/ERROR
     log_level: str = "INFO"
@@ -45,18 +45,18 @@ class Settings(BaseSettings):
     # Антишеринг-мониторинг (мягкий, без автоблокировки в MVP)
     anti_sharing_enabled: bool = True
     device_policy: str = "soft"
-    default_ip_limit: int = 3
-    warn_threshold_24h: int = 5
-    critical_threshold_24h: int = 8
+    default_ip_limit: int = Field(default=3, ge=0)
+    warn_threshold_24h: int = Field(default=5, ge=1)
+    critical_threshold_24h: int = Field(default=8, ge=1)
     auto_block_enabled: bool = False
-    tracking_window_hours: int = 24
-    anti_sharing_poll_minutes: int = 5
+    tracking_window_hours: int = Field(default=24, ge=1)
+    anti_sharing_poll_minutes: int = Field(default=5, ge=0)
 
     # Период фоновой проверки доступности серверов, секунды (0 — отключить).
-    server_health_poll_seconds: int = 60
+    server_health_poll_seconds: int = Field(default=60, ge=0)
 
     # Период проверки истекающих подписок для уведомлений, секунды (0 — отключить).
-    expiry_notify_poll_seconds: int = 300
+    expiry_notify_poll_seconds: int = Field(default=300, ge=0)
 
     @field_validator("bot_token", mode="before")
     @classmethod
@@ -77,6 +77,16 @@ class Settings(BaseSettings):
             return [value]
         if isinstance(value, str):
             return [int(part.strip()) for part in value.split(",") if part.strip()]
+        return value
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _clean_log_level(cls, value: object) -> object:
+        if isinstance(value, str):
+            cleaned = value.strip().upper()
+            allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+            if cleaned in allowed:
+                return cleaned
         return value
 
     def is_admin(self, telegram_id: int) -> bool:
