@@ -10,6 +10,7 @@ from app.db.models import PaymentRequest, Server, User, VpnClient
 # Кнопки пользовательского меню (inline)
 BTN_MY_SUBSCRIPTION = "Моя подписка"
 BTN_BUY = "Оформить подписку"
+BTN_ADMIN_PANEL = "\u0410\u0434\u043c\u0438\u043d-\u043f\u0430\u043d\u0435\u043b\u044c"
 BTN_INSTALL = "Как установить"
 BTN_FREE_PROXIES = "Бесплатные прокси"
 BTN_SUPPORT = "Поддержка"

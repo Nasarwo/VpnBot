@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -23,7 +22,7 @@ from app.db.repositories import (
     UserRepository,
     VpnClientRepository,
 )
-from app.services import audit, billing, bind_requests, payments, plans
+from app.services import access, audit, billing, bind_requests, payments, plans
 from app.services.subscription_link import (
     parse_subscription_public_id,
     subscription_link_example,
@@ -36,12 +35,14 @@ router = Router(name="user")
 
 
 def _is_active(client: VpnClient | None) -> bool:
-    if client is None or client.expires_at is None:
-        return False
-    expires = client.expires_at
-    if expires.tzinfo is None:
-        expires = expires.replace(tzinfo=UTC)
-    return expires > datetime.now(tz=UTC)
+    return access.has_active_timed_client(client)
+
+
+def _welcome_markup(client: VpnClient | None, db_user: User):
+    return keyboards.welcome_menu(
+        access.has_client_access(client),
+        is_admin=db_user.role == UserRole.ADMIN,
+    )
 
 
 async def _trial_available(session: AsyncSession, db_user: User) -> bool:
@@ -69,7 +70,7 @@ def _needs_onboarding(db_user: User, client: VpnClient | None) -> bool:
 async def _send_welcome(message: Message, db_user: User, client: VpnClient | None) -> None:
     await message.answer(
         texts.welcome(db_user),
-        reply_markup=keyboards.welcome_menu(_is_active(client)),
+        reply_markup=_welcome_markup(client, db_user),
         parse_mode="HTML",
     )
 
@@ -147,7 +148,7 @@ async def onboard_legacy(
         await _edit(
             callback,
             texts.welcome(db_user),
-            keyboards.welcome_menu(_is_active(client)),
+            _welcome_markup(client, db_user),
         )
         await callback.answer()
         return
@@ -213,19 +214,30 @@ async def menu_nav(
     action = callback_data.action
     logger.info("Меню tg=%s action=%s", db_user.telegram_id, action)
     client = await VpnClientRepository(session).get_for_user(db_user.id)
-    has_active = _is_active(client)
+    has_access = access.has_client_access(client)
+    is_admin = db_user.role == UserRole.ADMIN
 
     if action == "cancel_payment":
         await _cancel_payment(session, db_user, state)
         await _edit(
-            callback, texts.welcome(db_user), keyboards.welcome_menu(has_active)
+            callback, texts.welcome(db_user), _welcome_markup(client, db_user)
         )
         await callback.answer("Заявка отменена")
         return
 
     if action == "home":
         await _edit(
-            callback, texts.welcome(db_user), keyboards.welcome_menu(has_active)
+            callback, texts.welcome(db_user), _welcome_markup(client, db_user)
+        )
+    elif action == "admin_panel":
+        if not is_admin:
+            await callback.answer("Нет прав", show_alert=True)
+            return
+        servers = await ServerRepository(session).list_all()
+        await _edit(
+            callback,
+            texts.admin_panel_home(servers),
+            keyboards.admin_home_keyboard(),
         )
     elif action == "subscription":
         await _edit(
@@ -239,12 +251,19 @@ async def menu_nav(
         await _edit(
             callback, texts.extend_info(title), keyboards.extend_plans_keyboard()
         )
-    elif action == "connect":
+    elif action in {"connect", "connect_home"}:
+        if not has_access:
+            await callback.answer("Нет активной подписки", show_alert=True)
+            return
         servers = await ServerRepository(session).list_enabled()
         await _edit(
             callback,
             texts.connection_overview(servers),
-            keyboards.connection_keyboard(servers, db_user.public_id),
+            keyboards.connection_keyboard(
+                servers,
+                db_user.public_id,
+                back_action="home" if action == "connect_home" else "subscription",
+            ),
         )
     elif action == "buy":
         show_trial = await _trial_available(session, db_user)

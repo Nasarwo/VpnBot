@@ -25,8 +25,8 @@ from app.bot.router import build_root_router
 from app.config import Settings
 from app.db.enums import PaymentStatus, UserRole
 from app.db.models import PaymentRequest, User, VpnClient
-from app.db.repositories import PaymentRepository, UserRepository
-from app.services import billing, health, plans, provisioning
+from app.db.repositories import PaymentRepository, UserRepository, VpnClientRepository
+from app.services import access, billing, health, plans, provisioning
 from app.services.panel_updater import MockPanelUpdater, PanelUpdateError
 from app.services.provisioning import PanelClientInfo
 from app.services.xui_client import XuiAuthError, XuiClient, XuiError
@@ -199,12 +199,51 @@ async def test_user_role_is_recomputed_from_settings(session: AsyncSession):
     await session.commit()
 
     settings = Settings(admin_telegram_ids=[])
-    desired = UserRole.ADMIN if settings.is_admin(555) else UserRole.USER
+    desired = access.resolve_effective_role(settings, 555, None)
     if db_user.role != desired:
         db_user.role = desired
     await session.commit()
 
     refreshed = await repo.get_by_telegram_id(555)
+    assert refreshed.role == UserRole.USER
+
+
+async def test_user_role_is_recomputed_from_unlimited_client(
+    session: AsyncSession,
+    user: User,
+    vpn_client: VpnClient,
+):
+    settings = Settings(admin_telegram_ids=[])
+    client = await VpnClientRepository(session).get_for_user(user.id)
+
+    user.role = access.resolve_effective_role(
+        settings, user.telegram_id, client
+    )
+    await session.commit()
+
+    refreshed = await UserRepository(session).get_by_telegram_id(user.telegram_id)
+    assert refreshed.role == UserRole.ADMIN
+
+
+async def test_user_role_downgrades_when_unlimited_mapping_is_removed(
+    session: AsyncSession,
+    user: User,
+    vpn_client: VpnClient,
+):
+    settings = Settings(admin_telegram_ids=[])
+    user.role = UserRole.ADMIN
+    client = await VpnClientRepository(session).get_for_user(user.id)
+    assert client is not None
+    client.mappings.clear()
+    await session.commit()
+
+    client = await VpnClientRepository(session).get_for_user(user.id)
+    user.role = access.resolve_effective_role(
+        settings, user.telegram_id, client
+    )
+    await session.commit()
+
+    refreshed = await UserRepository(session).get_by_telegram_id(user.telegram_id)
     assert refreshed.role == UserRole.USER
 
 

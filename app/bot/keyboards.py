@@ -83,15 +83,39 @@ def cancel_payment_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def welcome_menu(has_active: bool) -> InlineKeyboardMarkup:
+def welcome_menu(has_access: bool, is_admin: bool = False) -> InlineKeyboardMarkup:
     """Главное меню под приветствием. Зависит от наличия активной подписки."""
-    if has_active:
+    rows: list[list[InlineKeyboardButton]] = []
+    if is_admin:
+        rows.append(
+            [
+                _btn(
+                    texts.BTN_ADMIN_PANEL,
+                    callback_data=MenuCallback(action="admin_panel").pack(),
+                    style="primary",
+                    icon="server",
+                )
+            ]
+        )
+        if has_access:
+            rows.append(
+                [
+                    _btn(
+                        texts.BTN_CONNECT,
+                        callback_data=MenuCallback(action="connect_home").pack(),
+                        style="success",
+                        icon="connect",
+                    )
+                ]
+            )
+    elif has_access:
         primary = _btn(
             texts.BTN_MY_SUBSCRIPTION,
             callback_data=MenuCallback(action="subscription").pack(),
             style="primary",
             icon="subscription",
         )
+        rows.append([primary])
     else:
         primary = _btn(
             texts.BTN_BUY,
@@ -99,6 +123,7 @@ def welcome_menu(has_active: bool) -> InlineKeyboardMarkup:
             style="primary",
             icon="buy",
         )
+        rows.append([primary])
     support = _btn(
         texts.BTN_SUPPORT,
         callback_data=MenuCallback(action="support").pack(),
@@ -121,9 +146,8 @@ def welcome_menu(has_active: bool) -> InlineKeyboardMarkup:
         style="danger",
         icon="cancel",
     )
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[primary], [install], [free_proxies], [support], [reset]]
-    )
+    rows.extend([[install], [free_proxies], [support], [reset]])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def reset_bot_confirm_keyboard() -> InlineKeyboardMarkup:
@@ -284,7 +308,7 @@ def purchase_plans_keyboard(show_trial: bool) -> InlineKeyboardMarkup:
 
 
 def connection_keyboard(
-    servers: list[Server], public_id: str | None
+    servers: list[Server], public_id: str | None, back_action: str = "subscription"
 ) -> InlineKeyboardMarkup:
     """Кнопки серверов: тап копирует ссылку-подписку. Назад — в меню подписки."""
     rows: list[list[InlineKeyboardButton]] = []
@@ -296,7 +320,7 @@ def connection_keyboard(
             link = (base if base.endswith("/") else base + "/") + public_id
             label = texts.server_button_label(server)
             rows.append([_btn(label, copy=link, style="primary")])
-    rows.append([_back_button("subscription")])
+    rows.append([_back_button(back_action)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

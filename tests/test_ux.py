@@ -42,6 +42,17 @@ def test_welcome_menu_active_vs_inactive():
     assert inactive[4].style == "danger"
 
 
+def test_welcome_menu_auto_admin_has_panel_and_connection():
+    admin = _all_buttons(keyboards.welcome_menu(True, is_admin=True))
+    labels = [button.text for button in admin]
+
+    assert admin[0].text == texts.BTN_ADMIN_PANEL
+    assert admin[0].style == "primary"
+    assert MenuCallback.unpack(admin[0].callback_data).action == "admin_panel"
+    assert texts.BTN_CONNECT in labels
+    assert texts.BTN_BUY not in labels
+
+
 def test_install_guides_keyboard_has_telegraph_links():
     buttons = _all_buttons(keyboards.install_guides_keyboard())
     assert buttons[0].text == texts.BTN_GUIDE_WINDOWS
@@ -144,6 +155,7 @@ def test_all_inline_buttons_have_color_style():
         keyboards.cancel_payment_keyboard(),
         keyboards.welcome_menu(True),
         keyboards.welcome_menu(False),
+        keyboards.welcome_menu(True, is_admin=True),
         keyboards.reset_bot_confirm_keyboard(),
         keyboards.install_guides_keyboard(),
         keyboards.free_proxies_keyboard(),
