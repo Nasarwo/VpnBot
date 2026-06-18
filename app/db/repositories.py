@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -32,6 +32,22 @@ class UserRepository:
     async def get_by_telegram_id(self, telegram_id: int) -> User | None:
         result = await self.session.execute(
             select(User).where(User.telegram_id == telegram_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_public_id(self, public_id: str) -> User | None:
+        cleaned = public_id.strip()
+        if not cleaned:
+            return None
+        result = await self.session.execute(
+            select(User).where(User.public_id == cleaned)
+        )
+        user = result.scalar_one_or_none()
+        if user is not None:
+            return user
+
+        result = await self.session.execute(
+            select(User).where(func.upper(User.public_id) == cleaned.upper())
         )
         return result.scalar_one_or_none()
 

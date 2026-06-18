@@ -398,6 +398,11 @@ def test_admin_home_keyboard_sections():
     assert "Заявки в ожидании" in labels
     assert "Удалить инбаунды" in labels
     assert "Антишеринг" in labels
+    sharing = next(b for b in btns if b.text == "Антишеринг")
+    assert sharing.icon_custom_emoji_id == emoji.custom_emoji_id("unknown")
+    back = btns[-1]
+    assert back.text == texts.BTN_BACK
+    assert MenuCallback.unpack(back.callback_data).action == "home"
 
 
 def test_admin_servers_keyboard_has_add_and_back():

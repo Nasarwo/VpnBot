@@ -292,12 +292,14 @@ async def admin_nav(
         return
 
     if action == "delete_subscription":
-        await state.set_state(AdminStates.waiting_delete_subscription_tg_id)
+        await state.set_state(AdminStates.waiting_delete_subscription_client_id)
         await _edit_panel(
             callback,
-            "Пришлите Telegram ID пользователя, чью подписку нужно удалить.\n\n"
+            "Пришлите внутренний ID клиента из 3x-ui, чью подписку нужно удалить.\n"
+            "Например: <code>6B8A6580</code>\n\n"
             "Клиент будет удалён со всех серверов и из бота. Отмена: /cancel.",
             keyboards.admin_back_keyboard("home"),
+            parse_mode="HTML",
         )
         return
 
@@ -389,7 +391,7 @@ async def admin_broadcast_send(
     )
 
 
-@router.message(AdminStates.waiting_delete_subscription_tg_id, Command("cancel"))
+@router.message(AdminStates.waiting_delete_subscription_client_id, Command("cancel"))
 async def admin_delete_subscription_cancel(
     message: Message, state: FSMContext
 ) -> None:
@@ -400,8 +402,8 @@ async def admin_delete_subscription_cancel(
     )
 
 
-@router.message(AdminStates.waiting_delete_subscription_tg_id, F.text)
-async def admin_delete_subscription_by_tg_id(
+@router.message(AdminStates.waiting_delete_subscription_client_id, F.text)
+async def admin_delete_subscription_by_client_id(
     message: Message,
     session: AsyncSession,
     state: FSMContext,
@@ -409,15 +411,13 @@ async def admin_delete_subscription_by_tg_id(
     settings: Settings,
 ) -> None:
     raw = (message.text or "").strip()
-    try:
-        telegram_id = int(raw)
-    except ValueError:
-        await message.answer("Telegram ID должен быть числом. Отмена: /cancel.")
+    if not raw:
+        await message.answer("ID клиента не должен быть пустым. Отмена: /cancel.")
         return
 
-    target = await UserRepository(session).get_by_telegram_id(telegram_id)
+    target = await UserRepository(session).get_by_public_id(raw)
     if target is None:
-        await message.answer("Пользователь не найден. Отмена: /cancel.")
+        await message.answer("Клиент с таким ID не найден. Отмена: /cancel.")
         return
 
     await message.answer("Удаляю клиента с серверов и из бота...")
@@ -451,12 +451,13 @@ async def admin_delete_subscription_by_tg_id(
     await state.clear()
     await notify.notify_user_subscription_deleted(message.bot, target.telegram_id)
     logger.info(
-        "Админ tg=%s удалил подписку пользователя tg=%s",
+        "Админ tg=%s удалил подписку клиента public_id=%s user_tg=%s",
         db_user.telegram_id,
+        target.public_id,
         target.telegram_id,
     )
     await message.answer(
-        f"Подписка пользователя {target.telegram_id} удалена со всех серверов и из бота.",
+        f"Подписка клиента {target.public_id or raw} удалена со всех серверов и из бота.",
         reply_markup=keyboards.admin_home_keyboard(),
     )
 

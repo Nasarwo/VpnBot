@@ -16,5 +16,5 @@ class AdminStates(StatesGroup):
     waiting_server_line = State()
     # Рассылка: админ присылает текст сообщения для всех пользователей.
     waiting_broadcast = State()
-    # Удаление подписки: админ присылает Telegram ID пользователя.
-    waiting_delete_subscription_tg_id = State()
+    # Удаление подписки: админ присылает внутренний ID клиента 3x-ui/subId.
+    waiting_delete_subscription_client_id = State()
