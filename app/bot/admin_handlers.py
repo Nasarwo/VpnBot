@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot import keyboards, notify, texts
+from app.bot import keyboards, notify, texts, ui
 from app.bot.callbacks import AdminCallback, BindCallback, PaymentCallback
 from app.bot.filters import IsAdmin
 from app.bot.states import AdminStates
@@ -122,7 +122,7 @@ async def _edit_panel(
     except TelegramBadRequest:
         # сообщение не изменилось / нельзя отредактировать — игнорируем
         pass
-    await callback.answer(alert, show_alert=bool(alert))
+    await ui.answer_callback(callback, alert, show_alert=bool(alert))
 
 
 @router.message(Command("admin"))
@@ -190,7 +190,7 @@ async def admin_nav(
     if action == "toggle":
         server = await repo.get_by_id(sid)
         if server is None:
-            await callback.answer("Сервер не найден", show_alert=True)
+            await ui.answer_callback(callback, "Сервер не найден", show_alert=True)
             return
         server.enabled = not server.enabled
         await session.commit()
@@ -205,14 +205,16 @@ async def admin_nav(
     if action == "import":
         server = await repo.get_by_id(sid)
         if server is None:
-            await callback.answer("Сервер не найден", show_alert=True)
+            await ui.answer_callback(callback, "Сервер не найден", show_alert=True)
             return
         try:
             summary = await provisioning.import_inbounds(
                 session, server, timeout=float(settings.xui_request_timeout)
             )
         except PanelUpdateError as exc:
-            await callback.answer(f"Ошибка панели: {exc}"[:200], show_alert=True)
+            await ui.answer_callback(
+                callback, f"Ошибка панели: {exc}"[:200], show_alert=True
+            )
             return
         await session.commit()
         server = await repo.get_with_inbounds(sid)
@@ -229,14 +231,16 @@ async def admin_nav(
     if action == "clients":
         server = await repo.get_by_id(sid)
         if server is None:
-            await callback.answer("Сервер не найден", show_alert=True)
+            await ui.answer_callback(callback, "Сервер не найден", show_alert=True)
             return
         try:
             clients = await provisioning.list_panel_clients(
                 server, timeout=float(settings.xui_request_timeout)
             )
         except PanelUpdateError as exc:
-            await callback.answer(f"Ошибка панели: {exc}"[:200], show_alert=True)
+            await ui.answer_callback(
+                callback, f"Ошибка панели: {exc}"[:200], show_alert=True
+            )
             return
         await _edit_panel(
             callback, texts.admin_panel_clients(sid, clients),
@@ -247,7 +251,7 @@ async def admin_nav(
     if action == "del":
         server = await repo.get_by_id(sid)
         if server is None:
-            await callback.answer("Сервер не найден", show_alert=True)
+            await ui.answer_callback(callback, "Сервер не найден", show_alert=True)
             return
         await _edit_panel(
             callback, texts.admin_confirm_delete(server),
@@ -329,7 +333,7 @@ async def admin_nav(
         )
         return
 
-    await callback.answer("Неизвестное действие", show_alert=True)
+    await ui.answer_callback(callback, "Неизвестное действие", show_alert=True)
 
 
 @router.message(AdminStates.waiting_server_line, Command("cancel"))
@@ -487,7 +491,7 @@ async def on_bind_action(
                 session, request_id, actor_user_id=db_user.id
             )
         except bind_requests.BindRequestError as exc:
-            await callback.answer(str(exc), show_alert=True)
+            await ui.answer_callback(callback, str(exc), show_alert=True)
             return
         full = await bind_repo.get_by_id_with_user(request_id)
         if full is not None and full.user is not None:
@@ -498,7 +502,7 @@ async def on_bind_action(
             f"Привязка отклонена.\n\n{texts.admin_bind_card(full, full.user)}",
             parse_mode="HTML",
         )
-        await callback.answer("Привязка отклонена")
+        await ui.answer_callback(callback, "Привязка отклонена")
         return
 
     if action in ("confirm", "retry"):
@@ -512,16 +516,18 @@ async def on_bind_action(
                     session, request_id, actor_user_id=db_user.id, updater=updater
                 )
         except bind_requests.BindRequestError as exc:
-            await callback.answer(str(exc), show_alert=True)
+            await ui.answer_callback(callback, str(exc), show_alert=True)
             return
 
         full = await bind_repo.get_by_id_with_user(request_id)
         if full is None:
-            await callback.answer("Заявка не найдена", show_alert=True)
+            await ui.answer_callback(callback, "Заявка не найдена", show_alert=True)
             return
 
         if result.already_applied:
-            await callback.answer("Привязка уже выполнена ранее", show_alert=True)
+            await ui.answer_callback(
+                callback, "Привязка уже выполнена ранее", show_alert=True
+            )
             return
 
         if result.applied and full.user is not None:
@@ -533,7 +539,7 @@ async def on_bind_action(
                 f"{texts.admin_bind_card(full, full.user)}",
                 parse_mode="HTML",
             )
-            await callback.answer("Привязка выполнена")
+            await ui.answer_callback(callback, "Привязка выполнена")
             return
 
         if full.user is not None:
@@ -548,10 +554,10 @@ async def on_bind_action(
             reply_markup=keyboards.admin_bind_retry_keyboard(request_id),
             parse_mode="HTML",
         )
-        await callback.answer("Не удалось привязать", show_alert=True)
+        await ui.answer_callback(callback, "Не удалось привязать", show_alert=True)
         return
 
-    await callback.answer("Неизвестное действие", show_alert=True)
+    await ui.answer_callback(callback, "Неизвестное действие", show_alert=True)
 
 
 @router.callback_query(PaymentCallback.filter())
@@ -575,23 +581,23 @@ async def on_payment_action(
     if action == "history":
         payment = await pay_repo.get_by_id_with_relations(payment_id)
         if payment is None:
-            await callback.answer("Заявка не найдена", show_alert=True)
+            await ui.answer_callback(callback, "Заявка не найдена", show_alert=True)
             return
         history = await pay_repo.history_for_user(payment.user_id)
         await callback.message.answer(
             texts.admin_history(history), parse_mode="HTML"
         )
-        await callback.answer()
+        await ui.answer_callback(callback)
         return
 
     if action == "profile":
         payment = await pay_repo.get_by_id_with_relations(payment_id)
         if payment is None:
-            await callback.answer("Заявка не найдена", show_alert=True)
+            await ui.answer_callback(callback, "Заявка не найдена", show_alert=True)
             return
         client = await VpnClientRepository(session).get_for_user(payment.user_id)
         await callback.message.answer(texts.admin_profile(payment.user, client))
-        await callback.answer()
+        await ui.answer_callback(callback)
         return
 
     if action == "reject":
@@ -607,7 +613,7 @@ async def on_payment_action(
             f"Заявка отклонена.\n\n{texts.admin_payment_card(payment, payment.user)}",
             parse_mode="HTML",
         )
-        await callback.answer("Заявка отклонена")
+        await ui.answer_callback(callback, "Заявка отклонена")
         return
 
     if action in ("confirm", "retry"):
@@ -624,7 +630,9 @@ async def on_payment_action(
         payment = await pay_repo.get_by_id_with_relations(payment_id)
 
         if result.already_applied:
-            await callback.answer("Заявка уже применена ранее", show_alert=True)
+            await ui.answer_callback(
+                callback, "Заявка уже применена ранее", show_alert=True
+            )
             return
 
         if result.applied and payment is not None:
@@ -641,7 +649,7 @@ async def on_payment_action(
                 f"{texts.admin_payment_card(payment, payment.user)}",
                 parse_mode="HTML",
             )
-            await callback.answer("Доступ продлён")
+            await ui.answer_callback(callback, "Доступ продлён")
             return
 
         if payment is not None:
@@ -654,10 +662,12 @@ async def on_payment_action(
                 reply_markup=keyboards.admin_retry_keyboard(payment_id),
                 parse_mode="HTML",
             )
-        await callback.answer("Не удалось применить продление", show_alert=True)
+        await ui.answer_callback(
+            callback, "Не удалось применить продление", show_alert=True
+        )
         return
 
-    await callback.answer("Неизвестное действие", show_alert=True)
+    await ui.answer_callback(callback, "Неизвестное действие", show_alert=True)
 
 
 @router.message(Command("pending"))

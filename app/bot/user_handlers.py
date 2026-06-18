@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot import keyboards, notify, texts
+from app.bot import keyboards, notify, texts, ui
 from app.bot.callbacks import MenuCallback, OnboardCallback, PlanCallback
 from app.bot.states import OnboardingStates, ProofStates
 from app.config import Settings
@@ -150,7 +150,7 @@ async def onboard_legacy(
             texts.welcome(db_user),
             _welcome_markup(client, db_user),
         )
-        await callback.answer()
+        await ui.answer_callback(callback)
         return
 
     await state.set_state(OnboardingStates.waiting_legacy_link)
@@ -159,7 +159,7 @@ async def onboard_legacy(
         texts.onboarding_send_link_prompt(subscription_link_example()),
         None,
     )
-    await callback.answer()
+    await ui.answer_callback(callback)
 
 
 @router.message(OnboardingStates.waiting_legacy_link, F.text)
@@ -222,7 +222,7 @@ async def menu_nav(
         await _edit(
             callback, texts.welcome(db_user), _welcome_markup(client, db_user)
         )
-        await callback.answer("Заявка отменена")
+        await ui.answer_callback(callback, "Заявка отменена")
         return
 
     if action == "home":
@@ -231,7 +231,7 @@ async def menu_nav(
         )
     elif action == "admin_panel":
         if not is_admin:
-            await callback.answer("Нет прав", show_alert=True)
+            await ui.answer_callback(callback, "Нет прав", show_alert=True)
             return
         servers = await ServerRepository(session).list_all()
         await _edit(
@@ -253,7 +253,7 @@ async def menu_nav(
         )
     elif action in {"connect", "connect_home"}:
         if not has_access:
-            await callback.answer("Нет активной подписки", show_alert=True)
+            await ui.answer_callback(callback, "Нет активной подписки", show_alert=True)
             return
         servers = await ServerRepository(session).list_enabled()
         await _edit(
@@ -299,7 +299,7 @@ async def menu_nav(
     elif action == "reset_yes":
         await _reset_bot_user(callback, session, db_user, settings, state)
         return
-    await callback.answer()
+    await ui.answer_callback(callback)
 
 
 async def _reset_bot_user(
@@ -347,7 +347,7 @@ async def _reset_bot_user(
         texts.onboarding_legacy_question(),
         keyboards.onboarding_legacy_keyboard(),
     )
-    await callback.answer("Данные сброшены")
+    await ui.answer_callback(callback, "Данные сброшены")
 
 
 @router.callback_query(PlanCallback.filter())
@@ -365,7 +365,7 @@ async def select_plan(
 
     plan = plans.get_plan(callback_data.code)
     if plan is None:
-        await callback.answer("Тариф не найден", show_alert=True)
+        await ui.answer_callback(callback, "Тариф не найден", show_alert=True)
         return
 
     payment = await payments.create_request(
@@ -381,7 +381,7 @@ async def select_plan(
     )
     # Админа уведомляем только после того, как пользователь пришлёт подтверждение.
     await state.set_state(ProofStates.waiting_proof)
-    await callback.answer()
+    await ui.answer_callback(callback)
 
 
 async def _cancel_payment(
@@ -432,7 +432,7 @@ async def _activate_trial(
         client = await VpnClientRepository(session).get_for_user(db_user.id)
         text = texts.trial_granted(client, settings.trial_period_days)
     await _edit(callback, text, keyboards.back_keyboard("home"))
-    await callback.answer()
+    await ui.answer_callback(callback)
 
 
 async def _attach_and_notify(

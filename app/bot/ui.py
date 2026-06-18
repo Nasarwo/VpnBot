@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
+
+logger = logging.getLogger(__name__)
 
 
 async def edit(callback: CallbackQuery, text: str, **kwargs: Any) -> None:
@@ -21,3 +25,19 @@ async def answer(callback: CallbackQuery, text: str, **kwargs: Any) -> None:
     msg = callback.message
     if isinstance(msg, Message):
         await msg.answer(text, **kwargs)
+
+
+async def answer_callback(
+    callback: CallbackQuery,
+    text: str | None = None,
+    **kwargs: Any,
+) -> None:
+    """Отвечает на callback и игнорирует протухшие query-id после сетевых лагов."""
+    try:
+        await callback.answer(text, **kwargs)
+    except TelegramBadRequest as exc:
+        message = str(exc).lower()
+        if "query is too old" in message or "query id is invalid" in message:
+            logger.debug("Callback answer skipped: %s", exc)
+            return
+        raise
