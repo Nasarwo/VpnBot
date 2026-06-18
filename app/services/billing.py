@@ -284,7 +284,9 @@ async def confirm_payment(
     """
     now = now or _utcnow()
     repo = PaymentRepository(session)
-    payment = await repo.get_by_id(payment_id)
+    # FOR UPDATE: сериализует параллельные подтверждения одной заявки до того,
+    # как статус будет переведён из waiting_admin (защита от двойного начисления).
+    payment = await repo.get_by_id_for_update(payment_id)
     if payment is None:
         raise BillingError("Заявка не найдена")
     logger.info(
@@ -315,7 +317,7 @@ async def retry_payment(
     """Повторное применение заявки, ранее завершившейся ошибкой (failed)."""
     now = now or _utcnow()
     repo = PaymentRepository(session)
-    payment = await repo.get_by_id(payment_id)
+    payment = await repo.get_by_id_for_update(payment_id)
     if payment is None:
         raise BillingError("Заявка не найдена")
 
