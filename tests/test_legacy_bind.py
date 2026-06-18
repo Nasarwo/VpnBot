@@ -3,8 +3,9 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import repositories
 from app.db.enums import Protocol
-from app.db.models import Server, ServerInbound, User
+from app.db.models import BindRequest, Server, ServerInbound, User
 from app.db.repositories import BindRequestRepository
 from app.services import bind_requests, provisioning
 from app.services.panel_updater import MockPanelUpdater
@@ -59,6 +60,33 @@ async def test_create_bind_request(session: AsyncSession):
     assert pending.public_id == "LEGACY42"
     assert pending.request_code.startswith("BIND-")
     assert user.onboarding_done is False
+
+
+async def test_create_bind_request_skips_duplicate_code(
+    session: AsyncSession, monkeypatch
+):
+    existing_user = User(telegram_id=555010, onboarding_done=True)
+    new_user = User(telegram_id=555011, onboarding_done=False)
+    session.add_all([existing_user, new_user])
+    await session.flush()
+    session.add(
+        BindRequest(
+            user_id=existing_user.id,
+            subscription_link="https://panel.example:2096/sub/OLDID",
+            public_id="OLDID",
+            request_code="BIND-DEADBEEF",
+        )
+    )
+    await session.commit()
+
+    tokens = iter(["deadbeef", "cafebabe"])
+    monkeypatch.setattr(repositories.secrets, "token_hex", lambda n: next(tokens))
+
+    req = await bind_requests.create_request(
+        session, new_user, "https://panel.example:2096/sub/NEWID"
+    )
+
+    assert req.request_code == "BIND-CAFEBABE"
 
 
 async def test_reject_bind_request_resets_onboarding(session: AsyncSession):

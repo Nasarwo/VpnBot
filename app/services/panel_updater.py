@@ -74,6 +74,12 @@ class PanelUpdater(TypingProtocol):
         """Создаёт/обновляет клиента сразу для всех inbound'ов сервера."""
         ...
 
+    async def delete_client(
+        self, server: Server, mappings: list[ClientServerMapping]
+    ) -> None:
+        """Удаляет клиента с сервера по сохранённым привязкам."""
+        ...
+
 
 class MockPanelUpdater:
     """Mock-реализация: ничего не делает либо имитирует сбой нужных серверов."""
@@ -82,11 +88,19 @@ class MockPanelUpdater:
         self.fail_server_ids = fail_server_ids or set()
         self.calls: list[tuple[int, int]] = []
         self.provisioned: list[tuple[int, str, tuple[int, ...]]] = []
+        self.deleted: list[tuple[int, tuple[str, ...]]] = []
 
     async def update_expiry(
         self, server: Server, mapping: ClientServerMapping, expiry_ms: int
     ) -> None:
         self.calls.append((server.id, expiry_ms))
+        if server.id in self.fail_server_ids:
+            raise PanelUpdateError(f"mock failure for server {server.id}")
+
+    async def delete_client(
+        self, server: Server, mappings: list[ClientServerMapping]
+    ) -> None:
+        self.deleted.append((server.id, tuple(m.email for m in mappings)))
         if server.id in self.fail_server_ids:
             raise PanelUpdateError(f"mock failure for server {server.id}")
 

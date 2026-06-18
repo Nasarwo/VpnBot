@@ -527,11 +527,12 @@ class XuiClient:
 
     async def del_client(self, inbound_id: int, client_uuid: str) -> None:
         """Удаляет клиента из inbound."""
+        path_id = _quote_path_segment(client_uuid)
         logger.info(
             "3x-ui delClient: inbound=%s id=%s", inbound_id, client_uuid
         )
         response = await self._api(
-            "POST", f"/panel/api/inbounds/{inbound_id}/delClient/{client_uuid}"
+            "POST", f"/panel/api/inbounds/{inbound_id}/delClient/{path_id}"
         )
         data = self._parse_json(response)
         if not data.get("success", False):

@@ -384,6 +384,7 @@ def test_admin_home_keyboard_sections():
     labels = [b.text for b in btns]
     assert "Серверы" in labels
     assert "Заявки в ожидании" in labels
+    assert "Удалить инбаунды" in labels
     assert "Антишеринг" in labels
 
 

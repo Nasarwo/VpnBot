@@ -289,6 +289,24 @@ async def test_get_client_ips_quotes_email_path_segment(httpx_mock: HTTPXMock):
     assert f"{BASE}/panel/api/clients/ips/e%40local%2Fwith-slash" in requested_urls
 
 
+async def test_del_client_quotes_identifier_path_segment(httpx_mock: HTTPXMock):
+    _mock_csrf(httpx_mock)
+    httpx_mock.add_response(
+        method="POST", url=f"{BASE}/login", json={"success": True}
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/panel/api/inbounds/7/delClient/e%40local%2Fwith-slash",
+        json={"success": True},
+    )
+
+    async with _client() as client:
+        await client.del_client(7, "e@local/with-slash")
+
+    requested_urls = [str(r.url) for r in httpx_mock.get_requests()]
+    assert f"{BASE}/panel/api/inbounds/7/delClient/e%40local%2Fwith-slash" in requested_urls
+
+
 async def test_supports_clients_api_true(httpx_mock: HTTPXMock):
     _mock_csrf(httpx_mock)
     httpx_mock.add_response(

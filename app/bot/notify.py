@@ -141,6 +141,16 @@ async def notify_user_bind_rejected(
         logger.warning("Не удалось уведомить пользователя %s", telegram_id)
 
 
+async def notify_user_subscription_deleted(bot: Bot, telegram_id: int) -> None:
+    try:
+        await bot.send_message(telegram_id, texts.subscription_deleted_by_admin())
+    except TelegramAPIError:
+        logger.warning(
+            "Не удалось уведомить пользователя %s об удалении подписки",
+            telegram_id,
+        )
+
+
 async def notify_admins_bind_failed(
     bot: Bot, settings: Settings, req: BindRequest, user: User
 ) -> None:

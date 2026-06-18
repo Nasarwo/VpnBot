@@ -25,7 +25,14 @@ from app.db.repositories import (
     UserRepository,
     VpnClientRepository,
 )
-from app.services import antishare, billing, bind_requests, broadcast, provisioning
+from app.services import (
+    antishare,
+    billing,
+    bind_requests,
+    broadcast,
+    provisioning,
+    subscription_delete,
+)
 from app.services.ip_provider import build_ip_provider
 from app.services.panel_updater import PanelUpdateError, PanelUpdater
 from app.services.xui_client import XuiClient, XuiError
@@ -284,6 +291,16 @@ async def admin_nav(
         )
         return
 
+    if action == "delete_subscription":
+        await state.set_state(AdminStates.waiting_delete_subscription_tg_id)
+        await _edit_panel(
+            callback,
+            "Пришлите Telegram ID пользователя, чью подписку нужно удалить.\n\n"
+            "Клиент будет удалён со всех серверов и из бота. Отмена: /cancel.",
+            keyboards.admin_back_keyboard("home"),
+        )
+        return
+
     if action == "pending":
         payments = await PaymentRepository(session).list_waiting_admin()
         binds = await BindRequestRepository(session).list_waiting_admin()
@@ -368,6 +385,78 @@ async def admin_broadcast_send(
     result = await broadcast.send_broadcast(message.bot, telegram_ids, text)
     await message.answer(
         texts.admin_broadcast_result(result.total, result.sent, result.failed),
+        reply_markup=keyboards.admin_home_keyboard(),
+    )
+
+
+@router.message(AdminStates.waiting_delete_subscription_tg_id, Command("cancel"))
+async def admin_delete_subscription_cancel(
+    message: Message, state: FSMContext
+) -> None:
+    await state.clear()
+    await message.answer(
+        "Удаление подписки отменено.",
+        reply_markup=keyboards.admin_home_keyboard(),
+    )
+
+
+@router.message(AdminStates.waiting_delete_subscription_tg_id, F.text)
+async def admin_delete_subscription_by_tg_id(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+    db_user: User,
+    settings: Settings,
+) -> None:
+    raw = (message.text or "").strip()
+    try:
+        telegram_id = int(raw)
+    except ValueError:
+        await message.answer("Telegram ID должен быть числом. Отмена: /cancel.")
+        return
+
+    target = await UserRepository(session).get_by_telegram_id(telegram_id)
+    if target is None:
+        await message.answer("Пользователь не найден. Отмена: /cancel.")
+        return
+
+    await message.answer("Удаляю клиента с серверов и из бота...")
+    result = await subscription_delete.delete_user_subscription(
+        session,
+        target,
+        _get_updater(settings),
+        actor_user_id=db_user.id,
+    )
+    if result.no_client:
+        await state.clear()
+        await message.answer(
+            "У пользователя нет подписки в боте.",
+            reply_markup=keyboards.admin_home_keyboard(),
+        )
+        return
+
+    if result.failed_servers:
+        await state.clear()
+        failed = "\n".join(
+            f"server {r.server_id}: {r.error}" for r in result.failed_servers
+        )
+        await message.answer(
+            "Не удалось удалить подписку со всех серверов. "
+            "Локальные данные в боте не удалены.\n\n"
+            f"{failed}\n\nПовторите позже или проверьте панели.",
+            reply_markup=keyboards.admin_home_keyboard(),
+        )
+        return
+
+    await state.clear()
+    await notify.notify_user_subscription_deleted(message.bot, target.telegram_id)
+    logger.info(
+        "Админ tg=%s удалил подписку пользователя tg=%s",
+        db_user.telegram_id,
+        target.telegram_id,
+    )
+    await message.answer(
+        f"Подписка пользователя {target.telegram_id} удалена со всех серверов и из бота.",
         reply_markup=keyboards.admin_home_keyboard(),
     )
 

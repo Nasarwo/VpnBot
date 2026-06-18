@@ -485,9 +485,6 @@ class PaymentRepository:
         return attachment
 
 
-BIND_CODE_BASE = 2001
-
-
 class BindRequestRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -535,14 +532,22 @@ class BindRequestRepository:
         result = await self.session.execute(select(func.count(BindRequest.id)))
         return int(result.scalar_one())
 
+    async def _generate_request_code(self) -> str:
+        while True:
+            code = f"BIND-{secrets.token_hex(4).upper()}"
+            existing = await self.session.execute(
+                select(BindRequest.id).where(BindRequest.request_code == code)
+            )
+            if existing.first() is None:
+                return code
+
     async def create(
         self,
         user_id: int,
         subscription_link: str,
         public_id: str,
     ) -> BindRequest:
-        seq = await self.count()
-        request_code = f"BIND-{BIND_CODE_BASE + seq}"
+        request_code = await self._generate_request_code()
         req = BindRequest(
             user_id=user_id,
             subscription_link=subscription_link,

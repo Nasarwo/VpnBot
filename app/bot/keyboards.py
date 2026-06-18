@@ -312,6 +312,8 @@ def admin_home_keyboard() -> InlineKeyboardMarkup:
                   icon="server")],
             [_btn("Заявки в ожидании", callback_data=_adm("pending"),
                   style="success", icon="subscription")],
+            [_btn("Удалить инбаунды", callback_data=_adm("delete_subscription"),
+                  style="danger", icon="cancel")],
             [_btn("Рассылка всем", callback_data=_adm("broadcast"),
                   style="success", icon="support")],
             [_btn("Антишеринг", callback_data=_adm("sharing"), style="success")],

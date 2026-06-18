@@ -169,6 +169,10 @@ def bind_request_approved(public_id: str) -> str:
     )
 
 
+def subscription_deleted_by_admin() -> str:
+    return "Ваша подписка была удалена администратором."
+
+
 def admin_bind_card(req, user: User) -> str:
     username = f"@{escape(user.username)}" if user.username else "—"
     pid = f"<code>{escape(req.public_id)}</code>"

@@ -200,6 +200,90 @@ class XuiPanelUpdater:
                 )
                 raise PanelUpdateError(str(exc)) from exc
 
+    async def delete_client(
+        self, server: Server, mappings: list[ClientServerMapping]
+    ) -> None:
+        if not mappings:
+            return
+        primary = mappings[0]
+        async with self._client(server) as client:
+            try:
+                if await client.supports_clients_api():
+                    await self._delete_new(client, primary)
+                else:
+                    inbound_ids = sorted({m.inbound_id for m in mappings})
+                    await self._delete_from_inbounds(
+                        client,
+                        inbound_ids,
+                        [primary.client_uuid, primary.email, primary.sub_id],
+                    )
+            except XuiError as exc:
+                logger.warning(
+                    "Ошибка удаления клиента на сервере %s: %s", server.id, exc
+                )
+                raise PanelUpdateError(str(exc)) from exc
+
+    async def _delete_new(
+        self, client: XuiClient, mapping: ClientServerMapping
+    ) -> None:
+        record = await client.get_client_record(mapping.email)
+        if record is None and mapping.sub_id:
+            record = await client.find_client_record_by_sub_id(mapping.sub_id)
+        if record is None:
+            logger.info("delete_client: клиент %s уже отсутствует", mapping.email)
+            return
+        inbound_ids = [
+            int(i) for i in (record.get("inboundIds") or []) if isinstance(i, int)
+        ]
+        if not inbound_ids:
+            inbound_ids = [mapping.inbound_id]
+        existing_body = client_record_body(record)
+        panel_email = (
+            str(existing_body.get("email") or "")
+            if existing_body is not None
+            else ""
+        )
+        await self._delete_from_inbounds(
+            client,
+            inbound_ids,
+            [panel_email, mapping.email, mapping.client_uuid, mapping.sub_id],
+        )
+
+    async def _delete_from_inbounds(
+        self,
+        client: XuiClient,
+        inbound_ids: list[int],
+        identifiers: list[str | None],
+    ) -> None:
+        candidates = list(dict.fromkeys(i for i in identifiers if i))
+        if not candidates:
+            raise XuiError("Нет идентификатора клиента для удаления")
+        for inbound_id in inbound_ids:
+            last_error: XuiError | None = None
+            for identifier in candidates:
+                try:
+                    await client.del_client(inbound_id, identifier)
+                    break
+                except XuiError as exc:
+                    if _is_missing_client_error(str(exc)):
+                        logger.info(
+                            "delete_client: inbound=%s identifier=%s уже отсутствует",
+                            inbound_id,
+                            identifier,
+                        )
+                        break
+                    last_error = exc
+            else:
+                raise last_error or XuiError(
+                    f"Не удалось удалить клиента из inbound {inbound_id}"
+                )
+
 
 def build_updater(timeout: float = 15.0) -> XuiPanelUpdater:
     return XuiPanelUpdater(timeout=timeout)
+
+
+def _is_missing_client_error(message: str) -> bool:
+    lowered = message.lower()
+    markers = ("not found", "not exist", "no such", "не найден", "не существует")
+    return any(marker in lowered for marker in markers)
