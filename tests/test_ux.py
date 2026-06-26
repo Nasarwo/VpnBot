@@ -77,12 +77,12 @@ def test_free_proxies_keyboard_links():
     assert buttons[0].text == texts.BTN_PROXY_MTPROTO
     assert buttons[0].url == texts.FREE_PROXY_MTPROTO_URL
     assert buttons[0].icon_custom_emoji_id == emoji.custom_emoji_id("connect")
-    assert buttons[1].text == texts.BTN_PROXY_SOCKS5
-    assert buttons[1].url == texts.FREE_PROXY_SOCKS5_URL
+    assert buttons[1].text == texts.BTN_PROXY_MTPROTO_2
+    assert buttons[1].url == texts.FREE_PROXY_MTPROTO_2_URL
     assert buttons[1].icon_custom_emoji_id == emoji.custom_emoji_id("server")
     assert buttons[2].text == texts.BTN_BACK
-    assert all("nasarwo.pro" in (button.url or "") for button in buttons[:2])
-    assert all("mind-forge.tech" not in (button.url or "") for button in buttons)
+    assert all("t.me/proxy" in (button.url or "") for button in buttons[:2])
+    assert all("nasarwo.pro" not in (button.url or "") for button in buttons)
 
 
 def test_welcome_menu_free_proxies_has_icon():

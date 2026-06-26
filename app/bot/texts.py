@@ -25,8 +25,8 @@ BTN_ONBOARD_YES = "Да, была подписка"
 BTN_ONBOARD_NO = "Нет, я новый пользователь"
 BTN_GUIDE_WINDOWS = "Windows"
 BTN_GUIDE_ANDROID_IOS = "Android & IOS"
-BTN_PROXY_MTPROTO = "MTProto"
-BTN_PROXY_SOCKS5 = "SOCKS5"
+BTN_PROXY_MTPROTO = "MTProto 1"
+BTN_PROXY_MTPROTO_2 = "MTProto 2"
 
 INSTALL_GUIDE_WINDOWS_URL = (
     "https://telegra.ph/Gajd-po-podklyucheniyu-Windows--07062026-06-07"
@@ -39,12 +39,12 @@ NEWS_CHANNEL_URL = "https://t.me/+FJMJEtjqREU3ODQy"
 BTN_NEWS_CHANNEL = "Подписаться на канал"
 
 FREE_PROXY_MTPROTO_URL = (
-    "https://t.me/proxy?server=nasarwo.pro&port=4430"
-    "&secret=ee3bd225a4e7ff0a76e932ec2f63ab89676e61736172776f2e70726f"
+    "https://t.me/proxy?server=mt.artobject.pro&port=443"
+    "&secret=6336c46e4f0029eba43cc4c511fa325f"
 )
-FREE_PROXY_SOCKS5_URL = (
-    "https://t.me/socks?server=nasarwo.pro&port=1080"
-    "&user=nasarwo&pass=nasarwo_socks"
+FREE_PROXY_MTPROTO_2_URL = (
+    "https://t.me/proxy?server=us.denezhkin.com&port=443"
+    "&secret=915936e5f690a65f9da50a8116d0ccc2"
 )
 
 # Дословный текст акции «приведи друга» (используется при продлении и оформлении).

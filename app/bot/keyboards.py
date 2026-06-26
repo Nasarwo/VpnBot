@@ -210,8 +210,8 @@ def free_proxies_keyboard() -> InlineKeyboardMarkup:
                     icon="connect",
                 ),
                 _btn(
-                    texts.BTN_PROXY_SOCKS5,
-                    url=texts.FREE_PROXY_SOCKS5_URL,
+                    texts.BTN_PROXY_MTPROTO_2,
+                    url=texts.FREE_PROXY_MTPROTO_2_URL,
                     style="primary",
                     icon="server",
                 ),
