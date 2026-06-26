@@ -14,6 +14,7 @@ from app.db.models import (
     ClientServerMapping,
     PaymentAttachment,
     PaymentRequest,
+    PendingServerUpdate,
     Server,
     ServerInbound,
     User,
@@ -574,6 +575,78 @@ class BindRequestRepository:
         self.session.add(req)
         await self.session.flush()
         return req
+
+
+class PendingServerUpdateRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def get_pending(
+        self,
+        *,
+        vpn_client_id: int,
+        server_id: int,
+        payment_request_id: int | None,
+    ) -> PendingServerUpdate | None:
+        query = (
+            select(PendingServerUpdate)
+            .where(PendingServerUpdate.vpn_client_id == vpn_client_id)
+            .where(PendingServerUpdate.server_id == server_id)
+            .where(PendingServerUpdate.status == "pending")
+        )
+        if payment_request_id is None:
+            query = query.where(PendingServerUpdate.payment_request_id.is_(None))
+        else:
+            query = query.where(
+                PendingServerUpdate.payment_request_id == payment_request_id
+            )
+        result = await self.session.execute(query.order_by(PendingServerUpdate.id.desc()))
+        return result.scalars().first()
+
+    async def upsert_pending(
+        self,
+        *,
+        vpn_client_id: int,
+        server_id: int,
+        payment_request_id: int | None,
+        target_expires_at: datetime,
+        last_error: str | None,
+    ) -> PendingServerUpdate:
+        existing = await self.get_pending(
+            vpn_client_id=vpn_client_id,
+            server_id=server_id,
+            payment_request_id=payment_request_id,
+        )
+        if existing is not None:
+            existing.target_expires_at = target_expires_at
+            existing.last_error = last_error
+            existing.next_retry_at = None
+            await self.session.flush()
+            return existing
+
+        update = PendingServerUpdate(
+            vpn_client_id=vpn_client_id,
+            server_id=server_id,
+            payment_request_id=payment_request_id,
+            target_expires_at=target_expires_at,
+            status="pending",
+            attempts=0,
+            last_error=last_error,
+        )
+        self.session.add(update)
+        await self.session.flush()
+        return update
+
+    async def list_pending_for_server(
+        self, server_id: int
+    ) -> list[PendingServerUpdate]:
+        result = await self.session.execute(
+            select(PendingServerUpdate)
+            .where(PendingServerUpdate.server_id == server_id)
+            .where(PendingServerUpdate.status == "pending")
+            .order_by(PendingServerUpdate.id.asc())
+        )
+        return list(result.scalars().all())
 
 
 class AuditRepository:

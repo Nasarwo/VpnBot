@@ -16,6 +16,7 @@ from app.db.session import get_sessionmaker
 from app.logging_config import setup_logging
 from app.services import antishare, expiry, health
 from app.services.ip_provider import build_ip_provider
+from app.services.xui_updater import build_updater
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +58,12 @@ async def _server_health_poller(settings: Settings) -> None:
     """Фоновая периодическая проверка доступности серверов 3x-ui."""
     interval = settings.server_health_poll_seconds
     timeout = min(float(settings.xui_request_timeout), 10.0)
+    updater = build_updater(timeout=float(settings.xui_request_timeout))
     sessionmaker = get_sessionmaker()
     while True:
         try:
             async with sessionmaker() as session:
-                await health.check_servers(session, timeout=timeout)
+                await health.check_servers(session, timeout=timeout, updater=updater)
         except Exception:  # noqa: BLE001 - фоновая задача не должна падать
             logger.exception("Ошибка фоновой проверки серверов")
         await asyncio.sleep(interval)

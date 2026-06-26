@@ -304,6 +304,38 @@ class IpObservation(Base):
     )
 
 
+class PendingServerUpdate(Base, TimestampMixin):
+    __tablename__ = "pending_server_updates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vpn_client_id: Mapped[int] = mapped_column(
+        ForeignKey("vpn_clients.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    server_id: Mapped[int] = mapped_column(
+        ForeignKey("servers.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    payment_request_id: Mapped[int | None] = mapped_column(
+        ForeignKey("payment_requests.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    target_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False, server_default="pending"
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, server_default="0"
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    vpn_client: Mapped[VpnClient] = relationship()
+    server: Mapped[Server] = relationship()
+    payment_request: Mapped[PaymentRequest | None] = relationship()
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

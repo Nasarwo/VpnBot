@@ -5,8 +5,8 @@ from datetime import timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.enums import PaymentStatus
-from app.db.models import User, VpnClient
+from app.db.enums import PaymentStatus, Protocol
+from app.db.models import ClientServerMapping, PendingServerUpdate, Server, User, VpnClient
 from app.db.repositories import PaymentRepository, VpnClientRepository
 from app.services import billing
 from app.services.panel_updater import MockPanelUpdater
@@ -124,7 +124,7 @@ async def test_second_purchase_is_not_first(
     assert r2.first_purchase is False
 
 
-async def test_confirm_fails_when_panel_fails(
+async def test_confirm_queues_failed_server_update(
     session: AsyncSession, user: User, vpn_client: VpnClient, server
 ):
     payment = await _make_waiting_payment(session, user)
@@ -134,14 +134,56 @@ async def test_confirm_fails_when_panel_fails(
         session, payment.id, actor_user_id=user.id, updater=updater
     )
 
-    assert result.applied is False
-    assert result.payment.status == PaymentStatus.FAILED
+    assert result.applied is True
+    assert result.payment.status == PaymentStatus.APPLIED
     assert result.failed_servers
     refreshed = await VpnClientRepository(session).get_for_user(user.id)
-    assert refreshed.expires_at is None  # срок не сохранён при ошибке
+    assert refreshed.expires_at is not None
+    rows = (await session.execute(PendingServerUpdate.__table__.select())).all()
+    assert len(rows) == 1
 
 
-async def test_retry_after_failure_succeeds(
+async def test_confirm_applies_available_servers_and_queues_unavailable(
+    session: AsyncSession, user: User, vpn_client: VpnClient, server
+):
+    second = Server(
+        name="srv-2",
+        country="DE",
+        panel_url="http://panel-2.local:2053",
+        username="admin",
+        password="secret",
+        enabled=True,
+    )
+    session.add(second)
+    await session.flush()
+    session.add(
+        ClientServerMapping(
+            vpn_client_id=vpn_client.id,
+            server_id=second.id,
+            inbound_id=1,
+            protocol=Protocol.VLESS,
+            client_uuid="uuid-1",
+            email="test@local",
+            enabled=True,
+        )
+    )
+    await session.commit()
+
+    payment = await _make_waiting_payment(session, user)
+    updater = MockPanelUpdater(fail_server_ids={second.id})
+
+    result = await billing.confirm_payment(
+        session, payment.id, actor_user_id=user.id, updater=updater
+    )
+
+    assert result.applied is True
+    assert [call[0] for call in updater.calls] == [server.id, second.id]
+    assert [r.server_id for r in result.failed_servers] == [second.id]
+    pending_rows = (await session.execute(PendingServerUpdate.__table__.select())).all()
+    assert len(pending_rows) == 1
+
+
+async def test_pending_update_applies_same_target_later(
     session: AsyncSession, user: User, vpn_client: VpnClient, server
 ):
     payment = await _make_waiting_payment(session, user)
@@ -151,21 +193,21 @@ async def test_retry_after_failure_succeeds(
         session, payment.id, actor_user_id=user.id, updater=failing, now=now
     )
 
-    failed = await PaymentRepository(session).get_by_id(payment.id)
-    assert failed.target_expires_at is not None
-    target = billing._as_aware(failed.target_expires_at)
+    applied = await PaymentRepository(session).get_by_id(payment.id)
+    assert applied.target_expires_at is not None
+    target = billing._as_aware(applied.target_expires_at)
 
-    later = now + timedelta(days=5)
+    from app.services import pending_updates
+
     healthy = MockPanelUpdater()
-    result = await billing.retry_payment(
-        session, payment.id, actor_user_id=user.id, updater=healthy, now=later
+    pending_results = await pending_updates.apply_pending_for_server(
+        session, server.id, healthy
     )
 
-    assert result.applied is True
-    assert result.payment.status == PaymentStatus.APPLIED
-    assert billing._as_aware(result.new_expires_at) == target
+    assert [item.ok for item in pending_results] == [True]
     refreshed = await VpnClientRepository(session).get_for_user(user.id)
     assert billing._as_aware(refreshed.expires_at) == target
+    assert healthy.calls[-1] == (server.id, billing.expiry_to_ms(target))
 
 
 async def test_manual_extend_fails_without_mappings(
@@ -201,7 +243,7 @@ async def test_confirm_stores_target_before_panel_failure(
     )
     refreshed = await PaymentRepository(session).get_by_id(payment.id)
     assert billing._as_aware(refreshed.target_expires_at) == now + timedelta(days=30)
-    assert refreshed.status == PaymentStatus.FAILED
+    assert refreshed.status == PaymentStatus.APPLIED
 
 
 async def test_confirm_requires_waiting_status(

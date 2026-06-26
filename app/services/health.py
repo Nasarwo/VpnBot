@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Server
 from app.db.repositories import ServerRepository
+from app.services import pending_updates
+from app.services.panel_updater import PanelUpdater
 from app.services.xui_client import XuiClient
 
 logger = logging.getLogger(__name__)
@@ -31,7 +33,11 @@ async def check_server(server: Server, timeout: float = 10.0) -> bool:
         return False
 
 
-async def check_servers(session: AsyncSession, timeout: float = 10.0) -> dict[int, bool]:
+async def check_servers(
+    session: AsyncSession,
+    timeout: float = 10.0,
+    updater: PanelUpdater | None = None,
+) -> dict[int, bool]:
     """Проверяет все серверы и сохраняет результат в БД.
 
     Возвращает отображение server_id -> online.
@@ -43,6 +49,25 @@ async def check_servers(session: AsyncSession, timeout: float = 10.0) -> dict[in
         online = await check_server(server, timeout=timeout)
         await repo.set_status(server.id, online)
         result[server.id] = online
+        if online and updater is not None:
+            try:
+                pending_results = await pending_updates.apply_pending_for_server(
+                    session, server.id, updater
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Ошибка применения отложенных обновлений server #%s", server.id
+                )
+                continue
+            applied = sum(1 for item in pending_results if item.ok)
+            failed = len(pending_results) - applied
+            if pending_results:
+                logger.info(
+                    "Pending updates server #%s: applied=%s failed=%s",
+                    server.id,
+                    applied,
+                    failed,
+                )
     await session.commit()
     logger.info(
         "Health-check серверов: %s",

@@ -120,6 +120,73 @@ def _build_spec(
     )
 
 
+async def apply_access_to_server(
+    session: AsyncSession,
+    vpn_client: VpnClient,
+    public_id: str,
+    server: Server,
+    expiry: datetime | None,
+    updater: PanelUpdater,
+    *,
+    identity: tuple[str, str, str] | None = None,
+) -> ServerUpdateResult:
+    """Create or update the panel client on one server."""
+    expiry_ms = _expiry_to_ms(expiry)
+    mapping_repo = MappingRepository(session)
+    existing_mappings = await mapping_repo.list_for_client(vpn_client.id)
+    server_mappings = [m for m in existing_mappings if m.server_id == server.id]
+
+    if identity is None:
+        anchor = existing_mappings[0] if existing_mappings else None
+        if anchor is not None:
+            secret = anchor.client_uuid
+            email = anchor.email
+            sub_id = anchor.sub_id or public_id
+        else:
+            secret = vpn_client.external_client_id or _new_secret()
+            email = client_email(public_id)
+            sub_id = public_id
+    else:
+        email, sub_id, secret = identity
+    vpn_client.external_client_id = secret
+
+    enabled_inbounds = [i for i in server.inbounds if i.enabled]
+    if not enabled_inbounds:
+        logger.warning(
+            "apply_access: server #%s (%s) has no enabled inbounds",
+            server.id,
+            server.name,
+        )
+        return ServerUpdateResult(
+            server_id=server.id, ok=False, error="no_enabled_inbounds"
+        )
+
+    spec = _build_spec(email, sub_id, secret, enabled_inbounds)
+    try:
+        await updater.provision_server(server, spec, expiry_ms)
+    except PanelUpdateError as exc:
+        logger.warning(
+            "apply_access: server=%s email=%s failed: %s",
+            server.id,
+            email,
+            exc,
+        )
+        return ServerUpdateResult(server_id=server.id, ok=False, error=str(exc))
+
+    if not server_mappings:
+        primary = enabled_inbounds[0]
+        await mapping_repo.create(
+            vpn_client_id=vpn_client.id,
+            server_id=server.id,
+            inbound_id=primary.inbound_id,
+            protocol=primary.protocol,
+            client_uuid=secret,
+            email=email,
+            sub_id=sub_id,
+        )
+    return ServerUpdateResult(server_id=server.id, ok=True)
+
+
 async def apply_access(
     session: AsyncSession,
     vpn_client: VpnClient,

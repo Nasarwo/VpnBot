@@ -13,7 +13,7 @@ from app.db.repositories import (
     PaymentRepository,
     VpnClientRepository,
 )
-from app.services import audit, provisioning
+from app.services import audit, pending_updates, provisioning
 from app.services.panel_updater import PanelUpdateError, PanelUpdater, ServerUpdateResult
 
 logger = logging.getLogger(__name__)
@@ -227,14 +227,10 @@ async def _extend_and_finalize(
         len(failed) + (1 if empty_error else 0),
     )
 
-    if empty_error or failed:
+    ok_results = [r for r in results if r.ok]
+    if empty_error:
         payment.status = PaymentStatus.FAILED
-        if empty_error:
-            payment.last_error = empty_error
-        else:
-            payment.last_error = "; ".join(
-                f"server {r.server_id}: {r.error}" for r in failed
-            )
+        payment.last_error = empty_error
         await audit.record(
             session,
             action="billing.failed",
@@ -248,19 +244,49 @@ async def _extend_and_finalize(
             payment=payment, applied=False, failed_servers=failed
         )
 
+    if failed:
+        await pending_updates.enqueue_failed_servers(
+            session,
+            vpn_client_id=client.id,
+            payment_request_id=payment.id,
+            target_expires_at=new_expiry,
+            failed_servers=failed,
+        )
+        payment.last_error = (
+            "Отложено применение на серверы: "
+            + "; ".join(f"server {r.server_id}: {r.error}" for r in failed)
+        )
+        await audit.record(
+            session,
+            action="billing.deferred_servers",
+            actor_user_id=actor_user_id,
+            entity_type="payment_request",
+            entity_id=payment.id,
+            payload={"failed_servers": [r.server_id for r in failed]},
+        )
+    if not ok_results and failed:
+        logger.info(
+            "Заявка id=%s не обновила ни один сервер сразу; все серверы отложены",
+            payment.id,
+        )
+
     client.expires_at = new_expiry
     client.is_active = True
     client.expiry_notify_stage = 0
     payment.status = PaymentStatus.APPLIED
     payment.applied_at = now
-    payment.last_error = None
+    if not failed:
+        payment.last_error = None
     await audit.record(
         session,
         action="billing.applied",
         actor_user_id=actor_user_id,
         entity_type="payment_request",
         entity_id=payment.id,
-        payload={"new_expires_at": new_expiry.isoformat()},
+        payload={
+            "new_expires_at": new_expiry.isoformat(),
+            "deferred_servers": [r.server_id for r in failed],
+        },
     )
     await session.commit()
     return BillingResult(
@@ -268,6 +294,7 @@ async def _extend_and_finalize(
         applied=True,
         first_purchase=first_purchase,
         new_expires_at=new_expiry,
+        failed_servers=failed,
     )
 
 
