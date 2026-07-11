@@ -46,8 +46,8 @@ class OnboardCallback(CallbackData, prefix="onb"):
 class AdminCallback(CallbackData, prefix="adm"):
     """Навигация по админ-панели (/admin).
 
-    action: home | servers | server | toggle | import | clients | del | del_yes |
-            add | pending | sharing | broadcast
+    action: home | servers | server | rename | subscription_url | toggle | import |
+            clients | del | del_yes | add | pending | sharing | broadcast
     server_id используется для действий над конкретным сервером.
     """
 

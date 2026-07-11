@@ -376,6 +376,9 @@ def admin_server_keyboard(server: Server) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [_btn(toggle, callback_data=_adm("toggle", server.id),
                   style="primary")],
+            [_btn("Изменить название", callback_data=_adm("rename", server.id))],
+            [_btn("Изменить URL подписки",
+                  callback_data=_adm("subscription_url", server.id))],
             [_btn("Импорт inbound'ов", callback_data=_adm("import", server.id),
                   style="success")],
             [_btn("Клиенты панели", callback_data=_adm("clients", server.id))],

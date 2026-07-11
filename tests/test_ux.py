@@ -5,7 +5,7 @@ from datetime import timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import emoji, keyboards, texts
-from app.bot.callbacks import MenuCallback
+from app.bot.callbacks import AdminCallback, MenuCallback
 from app.bot.user_handlers import _cancel_payment, _is_active, _trial_available
 from app.db.enums import AttachmentType, PaymentStatus
 from app.db.models import PaymentRequest, Server, User, VpnClient
@@ -426,6 +426,49 @@ def test_admin_server_keyboard_toggle_label():
         keyboards.admin_server_keyboard(on)))
     assert any(b.text == "Включить" for b in _all_buttons(
         keyboards.admin_server_keyboard(off)))
+    rename = next(
+        b for b in _all_buttons(keyboards.admin_server_keyboard(on))
+        if b.text == "Изменить название"
+    )
+    callback = AdminCallback.unpack(rename.callback_data)
+    assert callback.action == "rename"
+    assert callback.server_id == 1
+    subscription_url = next(
+        b for b in _all_buttons(keyboards.admin_server_keyboard(on))
+        if b.text == "Изменить URL подписки"
+    )
+    callback = AdminCallback.unpack(subscription_url.callback_data)
+    assert callback.action == "subscription_url"
+    assert callback.server_id == 1
+
+
+async def test_server_rename_preserves_server_identity(
+    session: AsyncSession, server: Server
+):
+    original_id = server.id
+    original_url = server.panel_url
+
+    renamed = await ServerRepository(session).rename(server.id, "Нидерланды 2")
+    await session.commit()
+
+    assert renamed is server
+    assert renamed.id == original_id
+    assert renamed.name == "Нидерланды 2"
+    assert renamed.panel_url == original_url
+
+
+async def test_subscription_url_change_preserves_server_identity(
+    session: AsyncSession, server: Server
+):
+    original_id = server.id
+    changed = await ServerRepository(session).set_subscription_base(
+        server.id, "https://sub.example/sub/"
+    )
+    await session.commit()
+
+    assert changed is server
+    assert changed.id == original_id
+    assert changed.subscription_base == "https://sub.example/sub/"
 
 
 def test_parse_server_line():

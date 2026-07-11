@@ -696,6 +696,37 @@ def test_parse_server_line_accepts_valid():
     assert server.subscription_base == "http://sub/"
 
 
+@pytest.mark.parametrize("raw", ["", "   ", "x" * 256])
+def test_validate_server_name_rejects_invalid(raw: str):
+    name, error = admin_handlers._validate_server_name(raw)
+    assert name is None
+    assert error
+
+
+def test_validate_server_name_trims_valid_name():
+    name, error = admin_handlers._validate_server_name("  Новый сервер  ")
+    assert error is None
+    assert name == "Новый сервер"
+
+
+@pytest.mark.parametrize(
+    "raw", ["", "example.com/sub/", "ftp://example.com/sub/", "https://", "x" * 513]
+)
+def test_validate_subscription_base_rejects_invalid(raw: str):
+    value, error = admin_handlers._validate_subscription_base(raw)
+    assert value is None
+    assert error
+
+
+def test_validate_subscription_base_accepts_url_and_clear_marker():
+    value, error = admin_handlers._validate_subscription_base(
+        "  https://sub.example/sub/  "
+    )
+    assert error is None
+    assert value == "https://sub.example/sub/"
+    assert admin_handlers._validate_subscription_base("-") == (None, None)
+
+
 def test_menu_callback_actions_are_strings():
     # Навигация по меню не несёт привилегированных параметров.
     assert set(MenuCallback.model_fields) == {"action"}

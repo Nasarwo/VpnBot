@@ -199,6 +199,26 @@ class ServerRepository:
         await self.session.flush()
         return server
 
+    async def rename(self, server_id: int, name: str) -> Server | None:
+        """Меняет только имя, сохраняя сервер и все его связи."""
+        server = await self.get_by_id(server_id)
+        if server is None:
+            return None
+        server.name = name
+        await self.session.flush()
+        return server
+
+    async def set_subscription_base(
+        self, server_id: int, subscription_base: str | None
+    ) -> Server | None:
+        """Меняет URL подписки, не затрагивая связи сервера."""
+        server = await self.get_by_id(server_id)
+        if server is None:
+            return None
+        server.subscription_base = subscription_base
+        await self.session.flush()
+        return server
+
     async def delete(self, server_id: int) -> bool:
         """Удаляет сервер вместе с inbound'ами и привязками (каскад).
 

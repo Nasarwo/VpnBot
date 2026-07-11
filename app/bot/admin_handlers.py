@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from html import escape
+from urllib.parse import urlparse
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -76,6 +77,35 @@ def _parse_server_line(raw: str) -> tuple[Server | None, str | None]:
         enabled=True,
     )
     return server, None
+
+
+def _validate_server_name(raw: str) -> tuple[str | None, str | None]:
+    name = (raw or "").strip()
+    if not name:
+        return None, "Название не может быть пустым."
+    if len(name) > 255:
+        return None, (
+            "Название слишком длинное (максимум 255 символов)."
+        )
+    return name, None
+
+
+def _validate_subscription_base(
+    raw: str,
+) -> tuple[str | None, str | None]:
+    value = (raw or "").strip()
+    if value in {"-", "—"}:
+        return None, None
+    if not value:
+        return None, (
+            "URL не может быть пустым. Для удаления отправьте «-»."
+        )
+    if len(value) > 512:
+        return None, "URL слишком длинный (максимум 512 символов)."
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None, "Введите полный URL с http:// или https://."
+    return value, None
 
 
 async def _finalize_new_server(
@@ -172,6 +202,7 @@ async def admin_nav(
         return
 
     if action == "server":
+        await state.clear()
         server = await repo.get_with_inbounds(sid)
         if server is None:
             servers = await repo.list_all()
@@ -199,6 +230,38 @@ async def admin_nav(
             callback, texts.admin_server_detail(server),
             keyboards.admin_server_keyboard(server),
             alert="Включён" if server.enabled else "Выключен",
+        )
+        return
+
+    if action == "rename":
+        server = await repo.get_by_id(sid)
+        if server is None:
+            await ui.answer_callback(callback, "Сервер не найден", show_alert=True)
+            return
+        await state.set_state(AdminStates.waiting_server_name)
+        await state.update_data(server_id=sid)
+        await _edit_panel(
+            callback,
+            f"Текущее название сервера #{sid}: {server.name}\n\n"
+            "Пришлите новое название. Отмена: /cancel.",
+            keyboards.admin_back_keyboard("server", sid),
+        )
+        return
+
+    if action == "subscription_url":
+        server = await repo.get_by_id(sid)
+        if server is None:
+            await ui.answer_callback(callback, "Сервер не найден", show_alert=True)
+            return
+        await state.set_state(AdminStates.waiting_server_subscription_url)
+        await state.update_data(server_id=sid)
+        await _edit_panel(
+            callback,
+            f"URL подписки сервера #{sid}: "
+            f"{server.subscription_base or 'не задан'}\n\n"
+            "Пришлите новый полный URL. Чтобы удалить URL, отправьте «-». "
+            "Отмена: /cancel.",
+            keyboards.admin_back_keyboard("server", sid),
         )
         return
 
@@ -363,6 +426,101 @@ async def admin_add_server_line(
     servers = await ServerRepository(session).list_all()
     await message.answer(
         text, reply_markup=keyboards.admin_servers_keyboard(servers)
+    )
+
+
+@router.message(AdminStates.waiting_server_name, Command("cancel"))
+async def admin_rename_server_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Переименование отменено.")
+
+
+@router.message(AdminStates.waiting_server_name, F.text)
+async def admin_rename_server_name(
+    message: Message, session: AsyncSession, state: FSMContext, db_user: User
+) -> None:
+    name, error = _validate_server_name(message.text or "")
+    if error is not None:
+        await message.answer(
+            error + "\n\nПришлите другое название или /cancel."
+        )
+        return
+    data = await state.get_data()
+    server_id = data.get("server_id")
+    if not isinstance(server_id, int):
+        await state.clear()
+        await message.answer(
+            "Не удалось определить сервер. Откройте его карточку снова."
+        )
+        return
+    server = await ServerRepository(session).rename(server_id, name)
+    if server is None:
+        await state.clear()
+        await message.answer("Сервер не найден — возможно, он был удалён.")
+        return
+    await session.commit()
+    await state.clear()
+    logger.info(
+        "Админ tg=%s переименовал сервер #%s в %r",
+        db_user.telegram_id,
+        server.id,
+        server.name,
+    )
+    renamed_server = await ServerRepository(session).get_with_inbounds(server.id)
+    if renamed_server is None:  # Защита от удаления после commit.
+        await message.answer("Сервер был удалён сразу после переименования.")
+        return
+    await message.answer(
+        f"Название сервера #{renamed_server.id} изменено на "
+        f"«{renamed_server.name}».\n\n"
+        + texts.admin_server_detail(renamed_server),
+        reply_markup=keyboards.admin_server_keyboard(renamed_server),
+    )
+
+
+@router.message(AdminStates.waiting_server_subscription_url, Command("cancel"))
+async def admin_subscription_url_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Изменение URL подписки отменено.")
+
+
+@router.message(AdminStates.waiting_server_subscription_url, F.text)
+async def admin_subscription_url_value(
+    message: Message, session: AsyncSession, state: FSMContext, db_user: User
+) -> None:
+    value, error = _validate_subscription_base(message.text or "")
+    if error is not None:
+        await message.answer(error + "\n\nПришлите другой URL, «-» или /cancel.")
+        return
+    data = await state.get_data()
+    server_id = data.get("server_id")
+    if not isinstance(server_id, int):
+        await state.clear()
+        await message.answer(
+            "Не удалось определить сервер. Откройте его карточку снова."
+        )
+        return
+    server = await ServerRepository(session).set_subscription_base(server_id, value)
+    if server is None:
+        await state.clear()
+        await message.answer("Сервер не найден — возможно, он был удалён.")
+        return
+    await session.commit()
+    await state.clear()
+    logger.info(
+        "Админ tg=%s изменил URL подписки сервера #%s",
+        db_user.telegram_id,
+        server.id,
+    )
+    server = await ServerRepository(session).get_with_inbounds(server.id)
+    if server is None:
+        await message.answer("Сервер был удалён сразу после изменения URL.")
+        return
+    result = value or "удалён"
+    await message.answer(
+        f"URL подписки сервера #{server.id}: {result}.\n\n"
+        + texts.admin_server_detail(server),
+        reply_markup=keyboards.admin_server_keyboard(server),
     )
 
 
@@ -954,6 +1112,74 @@ async def add_server(
         return
     text = await _finalize_new_server(session, server, settings)
     await message.answer(text)
+
+
+@router.message(Command("renameserver"))
+async def rename_server(
+    message: Message, command: CommandObject, session: AsyncSession, db_user: User
+) -> None:
+    raw = (command.args or "").strip()
+    server_id_raw, separator, name_raw = raw.partition(" ")
+    if not separator:
+        await message.answer("Формат: /renameserver <server_id> <новое название>")
+        return
+    try:
+        server_id = int(server_id_raw)
+    except ValueError:
+        await message.answer("server_id должен быть числом")
+        return
+    name, error = _validate_server_name(name_raw)
+    if error is not None:
+        await message.answer(error)
+        return
+    server = await ServerRepository(session).rename(server_id, name)
+    if server is None:
+        await message.answer("Сервер не найден")
+        return
+    await session.commit()
+    logger.info(
+        "Админ tg=%s переименовал сервер #%s в %r",
+        db_user.telegram_id,
+        server.id,
+        server.name,
+    )
+    await message.answer(f"Сервер #{server.id} переименован в «{server.name}».")
+
+
+@router.message(Command("setsubscriptionurl"))
+async def set_subscription_url(
+    message: Message, command: CommandObject, session: AsyncSession, db_user: User
+) -> None:
+    raw = (command.args or "").strip()
+    server_id_raw, separator, url_raw = raw.partition(" ")
+    if not separator:
+        await message.answer(
+            "Формат: /setsubscriptionurl <server_id> <URL или ->"
+        )
+        return
+    try:
+        server_id = int(server_id_raw)
+    except ValueError:
+        await message.answer("server_id должен быть числом")
+        return
+    value, error = _validate_subscription_base(url_raw)
+    if error is not None:
+        await message.answer(error)
+        return
+    server = await ServerRepository(session).set_subscription_base(server_id, value)
+    if server is None:
+        await message.answer("Сервер не найден")
+        return
+    await session.commit()
+    logger.info(
+        "Админ tg=%s изменил URL подписки сервера #%s",
+        db_user.telegram_id,
+        server.id,
+    )
+    await message.answer(
+        f"URL подписки сервера #{server.id} "
+        + (f"изменён на {value}." if value else "удалён.")
+    )
 
 
 @router.message(Command("addinbound"))
