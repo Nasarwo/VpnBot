@@ -200,3 +200,21 @@ async def test_provision_server_finds_client_by_sub_id(httpx_mock: HTTPXMock):
     assert len(upd) == 1
     add = [r for r in httpx_mock.get_requests() if r.url.path.endswith("/clients/add")]
     assert not add
+
+
+async def test_legacy_provisioning_keeps_one_email_for_every_inbound():
+    class FakeLegacyClient:
+        def __init__(self) -> None:
+            self.added: list[tuple[int, dict]] = []
+
+        async def get_client(self, *_args, **_kwargs):
+            return None
+
+        async def add_client(self, inbound_id: int, client_obj: dict) -> None:
+            self.added.append((inbound_id, client_obj))
+
+    client = FakeLegacyClient()
+    await XuiPanelUpdater()._provision_legacy(client, _spec(), 0)  # type: ignore[arg-type]
+
+    assert len(client.added) == 2
+    assert {body["email"] for _, body in client.added} == {"PUB123"}

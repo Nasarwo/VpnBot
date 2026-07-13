@@ -37,6 +37,13 @@ class Settings(BaseSettings):
 
     xui_request_timeout: int = Field(default=15, ge=1, le=120)
 
+    # Internal SubHub admin API. The returned public subscription URL is sent
+    # to the user, while this admin token must never leave the bot process.
+    subhub_url: str = ""
+    subhub_admin_token: str = ""
+    subhub_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    subhub_resolve_attempts: int = Field(default=4, ge=1, le=10)
+
     # Уровень логирования приложения: DEBUG/INFO/WARNING/ERROR
     log_level: str = "INFO"
     # Подробный лог HTTP-запросов к 3x-ui (метод/путь/статус). DEBUG-уровень.

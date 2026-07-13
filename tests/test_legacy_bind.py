@@ -10,6 +10,7 @@ from app.db.repositories import BindRequestRepository
 from app.services import bind_requests, provisioning
 from app.services.panel_updater import MockPanelUpdater
 from app.services.subscription_link import (
+    parse_subhub_subscription_token,
     parse_subscription_public_id,
     subscription_link_example,
 )
@@ -39,6 +40,17 @@ def test_subscription_link_example_is_abstract():
     assert subscription_link_example() == "https://example.com:2096/sub/ID"
 
 
+def test_parse_subhub_subscription_token_supports_encoded_and_raw_endpoints():
+    token = "stable_secret-token-123"
+    assert parse_subhub_subscription_token(
+        f"https://sub.example/connection/{token}"
+    ) == token
+    assert parse_subhub_subscription_token(
+        f"https://sub.example/connection/raw/{token}"
+    ) == token
+    assert parse_subhub_subscription_token(f"https://sub.example/sub/{token}") is None
+
+
 async def test_create_bind_request(session: AsyncSession):
     user = User(
         telegram_id=555001,
@@ -60,6 +72,21 @@ async def test_create_bind_request(session: AsyncSession):
     assert pending.public_id == "LEGACY42"
     assert pending.request_code.startswith("BIND-")
     assert user.onboarding_done is False
+
+
+async def test_create_bind_request_accepts_resolved_subhub_identity(session: AsyncSession):
+    user = User(telegram_id=555099, onboarding_done=False)
+    session.add(user)
+    await session.commit()
+
+    req = await bind_requests.create_request(
+        session,
+        user,
+        "https://sub.example/connection/stable_secret-token-123",
+        public_id_override="real-panel-identity",
+    )
+
+    assert req.public_id == "real-panel-identity"
 
 
 async def test_create_bind_request_skips_duplicate_code(

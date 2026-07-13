@@ -308,18 +308,32 @@ def purchase_plans_keyboard(show_trial: bool) -> InlineKeyboardMarkup:
 
 
 def connection_keyboard(
-    servers: list[Server], public_id: str | None, back_action: str = "subscription"
+    subscription_url: str | None, back_action: str = "subscription"
 ) -> InlineKeyboardMarkup:
-    """Кнопки серверов: тап копирует ссылку-подписку. Назад — в меню подписки."""
+    """One stable SubHub subscription link for every location and protocol."""
     rows: list[list[InlineKeyboardButton]] = []
-    if public_id:
-        for server in servers:
-            if not server.subscription_base:
-                continue
-            base = server.subscription_base
-            link = (base if base.endswith("/") else base + "/") + public_id
-            label = texts.server_button_label(server)
-            rows.append([_btn(label, copy=link, style="primary")])
+    if subscription_url:
+        happ_url = f"happ://add/{subscription_url}"
+        rows.append(
+            [
+                _btn(
+                    "Ссылка на подключение",
+                    copy=subscription_url,
+                    style="primary",
+                    icon="connect",
+                )
+            ]
+        )
+        rows.append(
+            [
+                _btn(
+                    "Подключение (Happ)",
+                    url=happ_url,
+                    style="success",
+                    icon="connect",
+                )
+            ]
+        )
     rows.append([_back_button(back_action)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

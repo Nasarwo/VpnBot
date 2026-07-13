@@ -283,25 +283,30 @@ def purchase_info(show_trial: bool) -> str:
     return "\n".join(lines)
 
 
-def connection_overview(servers: list[Server]) -> str:
-    """Экран «Подключение»: доступность серверов. parse_mode='HTML'."""
-    lines = [f"{emoji.tg('connect')} <b>Подключение</b>", "", "Доступность серверов:"]
-    visible = [s for s in servers if s.subscription_base]
-    if not visible:
-        lines.append("")
-        lines.append("Серверы пока не настроены. Обратитесь в поддержку.")
-        return "\n".join(lines)
-    for server in visible:
-        if server.is_online is True:
-            status = emoji.tg("ok")
-        elif server.is_online is False:
-            status = emoji.tg("down")
-        else:
-            status = emoji.tg("unknown")
-        lines.append(f"{escape(server_button_label(server))} — {status}")
-    lines.append("")
-    lines.append("Нажмите на сервер ниже, чтобы скопировать ссылку-подписку.")
-    return "\n".join(lines)
+def connection_overview() -> str:
+    """Unified SubHub connection screen. parse_mode='HTML'."""
+    return (
+        f"{emoji.tg('connect')} <b>Подключение</b>\n\n"
+        "Одна ссылка содержит все доступные страны и протоколы. "
+        "Список серверов, параметры Reality и маршрутизация обновляются автоматически.\n\n"
+        "Нажмите кнопку ниже, чтобы скопировать единую подписку."
+    )
+
+
+def connection_preparing() -> str:
+    return (
+        f"{emoji.tg('connect')} <b>Подписка подготавливается</b>\n\n"
+        "Серверы уже получили ваш доступ. Обновление единой ссылки может занять "
+        "несколько секунд — откройте этот раздел ещё раз."
+    )
+
+
+def connection_unavailable() -> str:
+    return (
+        f"{emoji.tg('connect')} <b>Подключение временно недоступно</b>\n\n"
+        "Не удалось получить единую ссылку. Попробуйте ещё раз немного позже "
+        "или обратитесь в поддержку."
+    )
 
 
 def period_label(period_days: int) -> str:

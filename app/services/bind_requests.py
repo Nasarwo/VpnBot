@@ -33,9 +33,11 @@ async def create_request(
     session: AsyncSession,
     user: User,
     subscription_link: str,
+    *,
+    public_id_override: str | None = None,
 ) -> BindRequest:
     """Создаёт заявку на привязку существующей подписки."""
-    public_id = parse_subscription_public_id(subscription_link)
+    public_id = public_id_override or parse_subscription_public_id(subscription_link)
     if public_id is None:
         raise BindRequestError(
             "Не удалось распознать ID в ссылке. Пришлите полную ссылку-подписку "

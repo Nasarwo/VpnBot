@@ -8,6 +8,8 @@ _PUBLIC_ID_CHARS_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _MIN_LEN_FROM_URL = 1
 _MIN_LEN_BARE = 3
 _MAX_LEN = 64
+_MIN_SUBHUB_TOKEN_LEN = 16
+_MAX_SUBHUB_TOKEN_LEN = 255
 
 
 def _is_valid_public_id(value: str, *, from_url: bool) -> bool:
@@ -45,6 +47,27 @@ def parse_subscription_public_id(link: str) -> str | None:
     if not _is_valid_public_id(public_id, from_url=True):
         return None
     return public_id
+
+
+def parse_subhub_subscription_token(link: str) -> str | None:
+    """Extract a secret token only from a SubHub /connection[/raw]/ URL."""
+    raw = (link or "").strip()
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) == 2 and parts[0] == "connection":
+        token = parts[1]
+    elif len(parts) == 3 and parts[:2] == ["connection", "raw"]:
+        token = parts[2]
+    else:
+        return None
+    if not (_MIN_SUBHUB_TOKEN_LEN <= len(token) <= _MAX_SUBHUB_TOKEN_LEN):
+        return None
+    return token if _PUBLIC_ID_CHARS_RE.fullmatch(token) else None
 
 
 SUBSCRIPTION_LINK_EXAMPLE = "https://example.com:2096/sub/ID"

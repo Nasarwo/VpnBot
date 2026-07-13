@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +38,7 @@ async def check_servers(
     session: AsyncSession,
     timeout: float = 10.0,
     updater: PanelUpdater | None = None,
+    on_updates_applied: Callable[[], Awaitable[object]] | None = None,
 ) -> dict[int, bool]:
     """Проверяет все серверы и сохраняет результат в БД.
 
@@ -45,6 +47,7 @@ async def check_servers(
     repo = ServerRepository(session)
     servers = await repo.list_all()
     result: dict[int, bool] = {}
+    applied_any = False
     for server in servers:
         online = await check_server(server, timeout=timeout)
         await repo.set_status(server.id, online)
@@ -60,6 +63,7 @@ async def check_servers(
                 )
                 continue
             applied = sum(1 for item in pending_results if item.ok)
+            applied_any = applied_any or applied > 0
             failed = len(pending_results) - applied
             if pending_results:
                 logger.info(
@@ -69,6 +73,8 @@ async def check_servers(
                     failed,
                 )
     await session.commit()
+    if applied_any and on_updates_applied is not None:
+        await on_updates_applied()
     logger.info(
         "Health-check серверов: %s",
         ", ".join(f"#{sid}:{'ok' if ok else 'down'}" for sid, ok in result.items())

@@ -36,6 +36,7 @@ from app.services import (
 )
 from app.services.ip_provider import build_ip_provider
 from app.services.panel_updater import PanelUpdateError, PanelUpdater
+from app.services.subhub_client import trigger_configured_sync
 from app.services.xui_client import XuiClient, XuiError
 from app.services.xui_updater import build_updater
 
@@ -610,6 +611,11 @@ async def admin_delete_subscription_by_client_id(
         )
         return
 
+    await trigger_configured_sync(
+        settings.subhub_url,
+        settings.subhub_admin_token,
+        timeout=settings.subhub_timeout_seconds,
+    )
     await state.clear()
     await notify.notify_user_subscription_deleted(message.bot, target.telegram_id)
     logger.info(
@@ -689,6 +695,11 @@ async def on_bind_action(
             return
 
         if result.applied and full.user is not None:
+            await trigger_configured_sync(
+                settings.subhub_url,
+                settings.subhub_admin_token,
+                timeout=settings.subhub_timeout_seconds,
+            )
             await notify.notify_user_bind_approved(
                 callback.bot, full.user.telegram_id, full.public_id
             )
@@ -794,6 +805,11 @@ async def on_payment_action(
             return
 
         if result.applied and payment is not None:
+            await trigger_configured_sync(
+                settings.subhub_url,
+                settings.subhub_admin_token,
+                timeout=settings.subhub_timeout_seconds,
+            )
             client = await VpnClientRepository(session).get_for_user(payment.user_id)
             if client is not None:
                 await notify.notify_user_extended(
@@ -877,6 +893,11 @@ async def confirm_cmd(
         )
         return
     if result.applied and full is not None:
+        await trigger_configured_sync(
+            settings.subhub_url,
+            settings.subhub_admin_token,
+            timeout=settings.subhub_timeout_seconds,
+        )
         client = await VpnClientRepository(session).get_for_user(full.user_id)
         if client is not None:
             await notify.notify_user_extended(
@@ -972,6 +993,11 @@ async def confirm_bind_cmd(
         )
         return
     if result.applied and full is not None and full.user is not None:
+        await trigger_configured_sync(
+            settings.subhub_url,
+            settings.subhub_admin_token,
+            timeout=settings.subhub_timeout_seconds,
+        )
         await notify.notify_user_bind_approved(
             message.bot, full.user.telegram_id, full.public_id
         )
@@ -1399,6 +1425,12 @@ async def provision_user(
         _get_updater(settings),
     )
     await session.commit()
+    if any(result.ok for result in results):
+        await trigger_configured_sync(
+            settings.subhub_url,
+            settings.subhub_admin_token,
+            timeout=settings.subhub_timeout_seconds,
+        )
     ok = [r.server_id for r in results if r.ok]
     failed = [(r.server_id, r.error) for r in results if not r.ok]
     await message.answer(texts.admin_provision_result(ok, failed))

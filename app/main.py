@@ -16,6 +16,7 @@ from app.db.session import get_sessionmaker
 from app.logging_config import setup_logging
 from app.services import antishare, expiry, health
 from app.services.ip_provider import build_ip_provider
+from app.services.subhub_client import trigger_configured_sync
 from app.services.xui_updater import build_updater
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,16 @@ async def _server_health_poller(settings: Settings) -> None:
     while True:
         try:
             async with sessionmaker() as session:
-                await health.check_servers(session, timeout=timeout, updater=updater)
+                await health.check_servers(
+                    session,
+                    timeout=timeout,
+                    updater=updater,
+                    on_updates_applied=lambda: trigger_configured_sync(
+                        settings.subhub_url,
+                        settings.subhub_admin_token,
+                        timeout=settings.subhub_timeout_seconds,
+                    ),
+                )
         except Exception:  # noqa: BLE001 - фоновая задача не должна падать
             logger.exception("Ошибка фоновой проверки серверов")
         await asyncio.sleep(interval)

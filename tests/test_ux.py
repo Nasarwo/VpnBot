@@ -103,29 +103,20 @@ def test_purchase_keyboard_trial_visibility():
 
 
 def test_connection_keyboard_uses_copy_text():
-    srv = Server(
-        id=1,
-        name="Швеция",
-        country="SE",
-        panel_url="http://x",
-        username="u",
-        password="p",
-        subscription_base="https://sub.example/sub/",
-        enabled=True,
+    markup = keyboards.connection_keyboard(
+        "https://sub.example/connection/ABCD1234"
     )
-    markup = keyboards.connection_keyboard([srv], "ABCD1234")
     copy_buttons = [b for b in _all_buttons(markup) if b.copy_text is not None]
     assert len(copy_buttons) == 1
-    assert copy_buttons[0].copy_text.text == "https://sub.example/sub/ABCD1234"
-    assert "Швеция" in copy_buttons[0].text
+    assert copy_buttons[0].copy_text.text == "https://sub.example/connection/ABCD1234"
+    assert copy_buttons[0].text == "Ссылка на подключение"
+    happ_buttons = [b for b in _all_buttons(markup) if b.text == "Подключение (Happ)"]
+    assert len(happ_buttons) == 1
+    assert happ_buttons[0].url == "happ://add/https://sub.example/connection/ABCD1234"
 
 
-def test_connection_keyboard_without_public_id_only_back():
-    srv = Server(
-        id=1, name="X", country="SE", panel_url="http://x",
-        username="u", password="p", subscription_base="https://s/sub/",
-    )
-    markup = keyboards.connection_keyboard([srv], None)
+def test_connection_keyboard_without_url_only_back():
+    markup = keyboards.connection_keyboard(None)
     buttons = _all_buttons(markup)
     assert len(buttons) == 1
     assert buttons[0].text == texts.BTN_BACK
@@ -163,8 +154,8 @@ def test_all_inline_buttons_have_color_style():
         keyboards.subscription_menu(),
         keyboards.extend_plans_keyboard(),
         keyboards.purchase_plans_keyboard(True),
-        keyboards.connection_keyboard([srv], "ABCD1234"),
-        keyboards.connection_keyboard([srv], None),
+        keyboards.connection_keyboard("https://sub.example/connection/ABCD1234"),
+        keyboards.connection_keyboard(None),
         keyboards.admin_home_keyboard(),
         keyboards.admin_servers_keyboard([srv]),
         keyboards.admin_server_keyboard(srv),
@@ -295,20 +286,11 @@ def test_no_texts_reference_removed_buttons():
     )
 
 
-def test_connection_overview_status_icons():
-    online = Server(
-        id=1, name="Швеция", country="SE", panel_url="http://x",
-        username="u", password="p", subscription_base="https://s/sub/",
-        is_online=True,
-    )
-    offline = Server(
-        id=2, name="Финляндия", country="FI", panel_url="http://y",
-        username="u", password="p", subscription_base="https://s/sub/",
-        is_online=False,
-    )
-    text = texts.connection_overview([online, offline])
-    assert "Швеция" in text and "Финляндия" in text
-    assert "tg-emoji" in text  # анимированные статус-иконки
+def test_connection_overview_describes_unified_auto_updated_link():
+    text = texts.connection_overview()
+    assert "Одна ссылка" in text
+    assert "обновляются автоматически" in text
+    assert "tg-emoji" in text
 
 
 # --- Логика состояний ---

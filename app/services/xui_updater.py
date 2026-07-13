@@ -124,7 +124,9 @@ class XuiPanelUpdater:
     ) -> None:
         """Старые панели: отдельный клиент в каждом inbound (per-inbound email)."""
         for inbound in spec.inbounds:
-            email = f"{spec.email}-{inbound.inbound_id}"
+            # Email is SubHub's global identity. 3x-ui scopes legacy clients to
+            # an inbound, so the same email is safe and must not be suffixed.
+            email = spec.email
             existing = await client.get_client(
                 inbound.inbound_id,
                 client_uuid=spec.client_uuid,

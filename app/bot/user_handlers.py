@@ -23,7 +23,14 @@ from app.db.repositories import (
     VpnClientRepository,
 )
 from app.services import access, audit, billing, bind_requests, payments, plans
+from app.services.subhub_client import (
+    SubHubClient,
+    SubHubError,
+    SubHubNotReady,
+    trigger_configured_sync,
+)
 from app.services.subscription_link import (
+    parse_subhub_subscription_token,
     parse_subscription_public_id,
     subscription_link_example,
 )
@@ -174,14 +181,36 @@ async def onboard_legacy_link(
     if link.startswith("/"):
         return
     example = subscription_link_example()
-    if parse_subscription_public_id(link) is None:
+    public_id = parse_subscription_public_id(link)
+    subhub_token = parse_subhub_subscription_token(link)
+    if subhub_token:
+        if not settings.subhub_url or not settings.subhub_admin_token:
+            await message.answer(texts.connection_unavailable(), parse_mode="HTML")
+            return
+        try:
+            async with SubHubClient(
+                settings.subhub_url,
+                settings.subhub_admin_token,
+                timeout=settings.subhub_timeout_seconds,
+            ) as subhub:
+                public_id = (await subhub.resolve(token=subhub_token)).email
+        except SubHubError as exc:
+            logger.warning("Unable to identify SubHub subscription: %s", type(exc).__name__)
+            await message.answer(texts.onboarding_invalid_link(example), parse_mode="HTML")
+            return
+    if public_id is None:
         await message.answer(
             texts.onboarding_invalid_link(example),
             parse_mode="HTML",
         )
         return
     try:
-        req = await bind_requests.create_request(session, db_user, link)
+        req = await bind_requests.create_request(
+            session,
+            db_user,
+            link,
+            public_id_override=public_id,
+        )
     except bind_requests.BindRequestError as exc:
         await message.answer(str(exc))
         return
@@ -255,16 +284,48 @@ async def menu_nav(
         if not has_access:
             await ui.answer_callback(callback, "Нет активной подписки", show_alert=True)
             return
-        servers = await ServerRepository(session).list_enabled()
-        await _edit(
-            callback,
-            texts.connection_overview(servers),
-            keyboards.connection_keyboard(
-                servers,
-                db_user.public_id,
-                back_action="home" if action == "connect_home" else "subscription",
-            ),
-        )
+        back_action = "home" if action == "connect_home" else "subscription"
+        identity = (client.email if client else None) or db_user.public_id
+        if not identity or not settings.subhub_url or not settings.subhub_admin_token:
+            logger.error("SubHub integration is not configured")
+            await _edit(
+                callback,
+                texts.connection_unavailable(),
+                keyboards.connection_keyboard(None, back_action=back_action),
+            )
+        else:
+            try:
+                async with SubHubClient(
+                    settings.subhub_url,
+                    settings.subhub_admin_token,
+                    timeout=settings.subhub_timeout_seconds,
+                ) as subhub:
+                    resolved = await subhub.resolve_after_sync(
+                        identity,
+                        attempts=settings.subhub_resolve_attempts,
+                    )
+            except SubHubNotReady:
+                await _edit(
+                    callback,
+                    texts.connection_preparing(),
+                    keyboards.connection_keyboard(None, back_action=back_action),
+                )
+            except (SubHubError, ValueError) as exc:
+                logger.warning("Unable to resolve SubHub subscription: %s", type(exc).__name__)
+                await _edit(
+                    callback,
+                    texts.connection_unavailable(),
+                    keyboards.connection_keyboard(None, back_action=back_action),
+                )
+            else:
+                await _edit(
+                    callback,
+                    texts.connection_overview(),
+                    keyboards.connection_keyboard(
+                        resolved.subscription_url,
+                        back_action=back_action,
+                    ),
+                )
     elif action == "buy":
         show_trial = await _trial_available(session, db_user)
         await _edit(
@@ -431,6 +492,11 @@ async def _activate_trial(
     else:
         client = await VpnClientRepository(session).get_for_user(db_user.id)
         text = texts.trial_granted(client, settings.trial_period_days)
+        await trigger_configured_sync(
+            settings.subhub_url,
+            settings.subhub_admin_token,
+            timeout=settings.subhub_timeout_seconds,
+        )
     await _edit(callback, text, keyboards.back_keyboard("home"))
     await ui.answer_callback(callback)
 
