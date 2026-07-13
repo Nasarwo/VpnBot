@@ -308,12 +308,13 @@ def purchase_plans_keyboard(show_trial: bool) -> InlineKeyboardMarkup:
 
 
 def connection_keyboard(
-    subscription_url: str | None, back_action: str = "subscription"
+    subscription_url: str | None,
+    happ_url: str | None = None,
+    back_action: str = "subscription",
 ) -> InlineKeyboardMarkup:
     """One stable SubHub subscription link for every location and protocol."""
     rows: list[list[InlineKeyboardButton]] = []
     if subscription_url:
-        happ_url = f"happ://add/{subscription_url}"
         rows.append(
             [
                 _btn(
@@ -324,6 +325,7 @@ def connection_keyboard(
                 )
             ]
         )
+    if happ_url:
         rows.append(
             [
                 _btn(

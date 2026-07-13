@@ -104,7 +104,8 @@ def test_purchase_keyboard_trial_visibility():
 
 def test_connection_keyboard_uses_copy_text():
     markup = keyboards.connection_keyboard(
-        "https://sub.example/connection/ABCD1234"
+        "https://sub.example/connection/ABCD1234",
+        "https://sub.example/happ/add/ABCD1234",
     )
     copy_buttons = [b for b in _all_buttons(markup) if b.copy_text is not None]
     assert len(copy_buttons) == 1
@@ -112,7 +113,7 @@ def test_connection_keyboard_uses_copy_text():
     assert copy_buttons[0].text == "Ссылка на подключение"
     happ_buttons = [b for b in _all_buttons(markup) if b.text == "Подключение (Happ)"]
     assert len(happ_buttons) == 1
-    assert happ_buttons[0].url == "happ://add/https://sub.example/connection/ABCD1234"
+    assert happ_buttons[0].url == "https://sub.example/happ/add/ABCD1234"
 
 
 def test_connection_keyboard_without_url_only_back():

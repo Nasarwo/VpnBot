@@ -14,6 +14,7 @@ async def test_resolve_returns_unified_subscription():
             "email": "client-id",
             "subscription_url": "https://sub.example/connection/stable-token",
             "raw_subscription_url": "https://sub.example/connection/raw/stable-token",
+            "happ_url": "https://sub.example/happ/add/stable-token",
         })
 
     async with SubHubClient(
@@ -42,6 +43,7 @@ async def test_resolve_after_sync_waits_for_new_panel_client():
             "email": "client-id",
             "subscription_url": "https://sub.example/connection/token",
             "raw_subscription_url": "https://sub.example/connection/raw/token",
+            "happ_url": "https://sub.example/happ/add/token",
         })
 
     async with SubHubClient(

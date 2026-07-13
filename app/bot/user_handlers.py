@@ -323,6 +323,7 @@ async def menu_nav(
                     texts.connection_overview(),
                     keyboards.connection_keyboard(
                         resolved.subscription_url,
+                        resolved.happ_url,
                         back_action=back_action,
                     ),
                 )

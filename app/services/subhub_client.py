@@ -24,6 +24,7 @@ class ResolvedSubscription:
     email: str
     subscription_url: str
     raw_subscription_url: str
+    happ_url: str
 
 
 class SubHubClient:
@@ -83,10 +84,15 @@ class SubHubClient:
                 email=email_value.strip().casefold(),
                 subscription_url=str(data["subscription_url"]),
                 raw_subscription_url=str(data["raw_subscription_url"]),
+                happ_url=str(data["happ_url"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise SubHubError("SubHub returned an invalid response") from exc
-        for value in (resolved.subscription_url, resolved.raw_subscription_url):
+        for value in (
+            resolved.subscription_url,
+            resolved.raw_subscription_url,
+            resolved.happ_url,
+        ):
             parsed = urlparse(value)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise SubHubError("SubHub returned an invalid subscription URL")
