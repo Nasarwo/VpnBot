@@ -310,6 +310,8 @@ def purchase_plans_keyboard(show_trial: bool) -> InlineKeyboardMarkup:
 def connection_keyboard(
     subscription_url: str | None,
     happ_url: str | None = None,
+    ru_subscription_url: str | None = None,
+    ru_happ_url: str | None = None,
     back_action: str = "subscription",
 ) -> InlineKeyboardMarkup:
     """One stable SubHub subscription link for every location and protocol."""
@@ -331,6 +333,28 @@ def connection_keyboard(
                 _btn(
                     "Подключение (Happ)",
                     url=happ_url,
+                    style="success",
+                    icon="connect",
+                )
+            ]
+        )
+    if ru_subscription_url:
+        rows.append(
+            [
+                _btn(
+                    "Через 🇷🇺",
+                    copy=ru_subscription_url,
+                    style="primary",
+                    icon="connect",
+                )
+            ]
+        )
+    if ru_happ_url:
+        rows.append(
+            [
+                _btn(
+                    "Через 🇷🇺 (Happ)",
+                    url=ru_happ_url,
                     style="success",
                     icon="connect",
                 )

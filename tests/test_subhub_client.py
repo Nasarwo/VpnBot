@@ -3,7 +3,11 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from app.services.subhub_client import SubHubClient, SubHubError
+from app.services.subhub_client import (
+    SubHubClient,
+    SubHubError,
+    build_happ_import_url,
+)
 
 
 async def test_resolve_returns_unified_subscription():
@@ -69,3 +73,16 @@ async def test_authentication_failure_has_safe_error_message():
             await client.resolve(email="client-id")
 
     assert "do-not-leak-this" not in str(error.value)
+
+
+def test_build_happ_import_url_is_stable_and_opaque():
+    subscription = "https://enderworld.org/sub/client-public-id"
+    first = build_happ_import_url(
+        "https://sub.example", "admin-secret", subscription
+    )
+    second = build_happ_import_url(
+        "https://sub.example/", "admin-secret", subscription
+    )
+    assert first == second
+    assert first.startswith("https://sub.example/happ/import/")
+    assert subscription not in first

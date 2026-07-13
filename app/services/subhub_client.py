@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -25,6 +28,30 @@ class ResolvedSubscription:
     subscription_url: str
     raw_subscription_url: str
     happ_url: str
+
+
+def build_happ_import_url(
+    subhub_url: str, admin_token: str, subscription_url: str
+) -> str:
+    """Build a signed HTTPS trampoline for importing a legacy subscription."""
+    parsed_subscription = urlparse(subscription_url)
+    if (
+        parsed_subscription.scheme != "https"
+        or not parsed_subscription.netloc
+        or parsed_subscription.username
+        or parsed_subscription.password
+    ):
+        raise ValueError("a valid HTTPS subscription URL is required")
+    parsed_subhub = urlparse(subhub_url)
+    if parsed_subhub.scheme not in {"http", "https"} or not parsed_subhub.netloc:
+        raise ValueError("a valid SubHub URL is required")
+    if not admin_token.strip():
+        raise ValueError("SubHub admin token is required")
+    payload = base64.urlsafe_b64encode(subscription_url.encode()).decode().rstrip("=")
+    signature = hmac.new(
+        admin_token.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+    return f"{subhub_url.rstrip('/')}/happ/import/{payload}/{signature}"
 
 
 class SubHubClient:

@@ -27,6 +27,7 @@ from app.services.subhub_client import (
     SubHubClient,
     SubHubError,
     SubHubNotReady,
+    build_happ_import_url,
     trigger_configured_sync,
 )
 from app.services.subscription_link import (
@@ -286,13 +287,42 @@ async def menu_nav(
             return
         back_action = "home" if action == "connect_home" else "subscription"
         servers = await ServerRepository(session).list_enabled()
+        ru_server = next(
+            (
+                server
+                for server in servers
+                if server.kind == "ru_proxy" and server.subscription_base
+            ),
+            None,
+        )
+        ru_subscription_url = None
+        ru_happ_url = None
+        if ru_server and db_user.public_id:
+            base = ru_server.subscription_base
+            ru_subscription_url = (
+                (base if base.endswith("/") else base + "/") + db_user.public_id
+            )
+            if settings.subhub_url and settings.subhub_admin_token:
+                try:
+                    ru_happ_url = build_happ_import_url(
+                        settings.subhub_url,
+                        settings.subhub_admin_token,
+                        ru_subscription_url,
+                    )
+                except ValueError:
+                    logger.warning("Unable to build RU proxy Happ URL")
         identity = (client.email if client else None) or db_user.public_id
         if not identity or not settings.subhub_url or not settings.subhub_admin_token:
             logger.error("SubHub integration is not configured")
             await _edit(
                 callback,
                 texts.connection_unavailable(),
-                keyboards.connection_keyboard(None, back_action=back_action),
+                keyboards.connection_keyboard(
+                    None,
+                    ru_subscription_url=ru_subscription_url,
+                    ru_happ_url=ru_happ_url,
+                    back_action=back_action,
+                ),
             )
         else:
             try:
@@ -309,14 +339,24 @@ async def menu_nav(
                 await _edit(
                     callback,
                     texts.connection_preparing(),
-                    keyboards.connection_keyboard(None, back_action=back_action),
+                    keyboards.connection_keyboard(
+                        None,
+                        ru_subscription_url=ru_subscription_url,
+                        ru_happ_url=ru_happ_url,
+                        back_action=back_action,
+                    ),
                 )
             except (SubHubError, ValueError) as exc:
                 logger.warning("Unable to resolve SubHub subscription: %s", type(exc).__name__)
                 await _edit(
                     callback,
                     texts.connection_unavailable(),
-                    keyboards.connection_keyboard(None, back_action=back_action),
+                    keyboards.connection_keyboard(
+                        None,
+                        ru_subscription_url=ru_subscription_url,
+                        ru_happ_url=ru_happ_url,
+                        back_action=back_action,
+                    ),
                 )
             else:
                 await _edit(
@@ -325,6 +365,8 @@ async def menu_nav(
                     keyboards.connection_keyboard(
                         resolved.subscription_url,
                         resolved.happ_url,
+                        ru_subscription_url,
+                        ru_happ_url,
                         back_action=back_action,
                     ),
                 )
