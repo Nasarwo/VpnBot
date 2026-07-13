@@ -287,10 +287,41 @@ def test_no_texts_reference_removed_buttons():
     )
 
 
-def test_connection_overview_describes_unified_auto_updated_link():
-    text = texts.connection_overview()
-    assert "Одна ссылка" in text
-    assert "обновляются автоматически" in text
+def test_connection_overview_shows_server_availability():
+    servers = [
+        Server(
+            id=1,
+            name="🇷🇺 Россия",
+            country="RU",
+            panel_url="https://ru",
+            username="u",
+            password="p",
+            is_online=True,
+        ),
+        Server(
+            id=2,
+            name="🇳🇱 Нидерланды",
+            country="NL",
+            panel_url="https://nl",
+            username="u",
+            password="p",
+            is_online=False,
+        ),
+        Server(
+            id=3,
+            name="🇵🇱 Польша",
+            country="PL",
+            panel_url="https://pl",
+            username="u",
+            password="p",
+            is_online=None,
+        ),
+    ]
+    text = texts.connection_overview(servers)
+    assert "Доступность серверов:" in text
+    assert "🇷🇺 Россия" in text
+    assert "🇳🇱 Нидерланды" in text
+    assert "🇵🇱 Польша" in text
     assert "tg-emoji" in text
 
 

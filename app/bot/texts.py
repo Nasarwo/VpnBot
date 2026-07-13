@@ -283,14 +283,21 @@ def purchase_info(show_trial: bool) -> str:
     return "\n".join(lines)
 
 
-def connection_overview() -> str:
-    """Unified SubHub connection screen. parse_mode='HTML'."""
-    return (
-        f"{emoji.tg('connect')} <b>Подключение</b>\n\n"
-        "Одна ссылка содержит все доступные страны и протоколы. "
-        "Список серверов, параметры Reality и маршрутизация обновляются автоматически.\n\n"
-        "Нажмите кнопку ниже, чтобы скопировать единую подписку."
-    )
+def connection_overview(servers: list[Server]) -> str:
+    """Unified SubHub connection screen with live server availability."""
+    lines = [f"{emoji.tg('connect')} <b>Подключение</b>", "", "Доступность серверов:"]
+    if not servers:
+        lines.extend(["", "Серверы пока не настроены. Обратитесь в поддержку."])
+        return "\n".join(lines)
+    for server in servers:
+        if server.is_online is True:
+            status = emoji.tg("ok")
+        elif server.is_online is False:
+            status = emoji.tg("down")
+        else:
+            status = emoji.tg("unknown")
+        lines.append(f"{escape(server_button_label(server))} — {status}")
+    return "\n".join(lines)
 
 
 def connection_preparing() -> str:

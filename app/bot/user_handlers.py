@@ -285,6 +285,7 @@ async def menu_nav(
             await ui.answer_callback(callback, "Нет активной подписки", show_alert=True)
             return
         back_action = "home" if action == "connect_home" else "subscription"
+        servers = await ServerRepository(session).list_enabled()
         identity = (client.email if client else None) or db_user.public_id
         if not identity or not settings.subhub_url or not settings.subhub_admin_token:
             logger.error("SubHub integration is not configured")
@@ -320,7 +321,7 @@ async def menu_nav(
             else:
                 await _edit(
                     callback,
-                    texts.connection_overview(),
+                    texts.connection_overview(servers),
                     keyboards.connection_keyboard(
                         resolved.subscription_url,
                         resolved.happ_url,
