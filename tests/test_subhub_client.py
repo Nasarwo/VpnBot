@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -59,6 +61,35 @@ async def test_resolve_after_sync_waits_for_new_panel_client():
     assert result.email == "client-id"
     assert resolves == 2
     assert syncs == 1
+
+
+async def test_resolve_candidates_uses_mapping_identity_before_sync():
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/admin/subscriptions/resolve"):
+            identity = json.loads(request.content)["email"]
+            requested.append(identity)
+            if identity == "mapping@example.com":
+                return httpx.Response(200, json={
+                    "email": identity,
+                    "subscription_url": "https://sub.example/connection/token",
+                    "raw_subscription_url": "https://sub.example/connection/raw/token",
+                    "happ_url": "https://sub.example/happ/add/token",
+                })
+            return httpx.Response(404)
+        raise AssertionError("sync must not run when a mapping identity resolves")
+
+    async with SubHubClient(
+        "https://sub.example", "admin", transport=httpx.MockTransport(handler)
+    ) as client:
+        result = await client.resolve_candidates_after_sync(
+            ["stale@example.com", " Mapping@Example.com ", "mapping@example.com"],
+            poll_delay=0,
+        )
+
+    assert result.email == "mapping@example.com"
+    assert requested == ["stale@example.com", "mapping@example.com"]
 
 
 async def test_authentication_failure_has_safe_error_message():

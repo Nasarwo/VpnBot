@@ -320,7 +320,7 @@ def connection_keyboard(
         rows.append(
             [
                 _btn(
-                    "Подключение",
+                    "Ссылка на подключение",
                     copy=subscription_url,
                     style="primary",
                     icon="connect",

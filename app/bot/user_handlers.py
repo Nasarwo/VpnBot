@@ -311,8 +311,16 @@ async def menu_nav(
                     )
                 except ValueError:
                     logger.warning("Unable to build RU proxy Happ URL")
-        identity = (client.email if client else None) or db_user.public_id
-        if not identity or not settings.subhub_url or not settings.subhub_admin_token:
+        identities = []
+        if client:
+            identities.extend(
+                [client.email or "", *(mapping.email for mapping in client.mappings)]
+            )
+        identities.append(db_user.public_id or "")
+        identities = list(
+            dict.fromkeys(value.strip().casefold() for value in identities if value.strip())
+        )
+        if not identities or not settings.subhub_url or not settings.subhub_admin_token:
             logger.error("SubHub integration is not configured")
             await _edit(
                 callback,
@@ -331,8 +339,8 @@ async def menu_nav(
                     settings.subhub_admin_token,
                     timeout=settings.subhub_timeout_seconds,
                 ) as subhub:
-                    resolved = await subhub.resolve_after_sync(
-                        identity,
+                    resolved = await subhub.resolve_candidates_after_sync(
+                        identities,
                         attempts=settings.subhub_resolve_attempts,
                     )
             except SubHubNotReady:

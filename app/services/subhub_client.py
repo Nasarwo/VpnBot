@@ -143,18 +143,50 @@ class SubHubClient:
         attempts: int = 4,
         poll_delay: float = 1.0,
     ) -> ResolvedSubscription:
+        return await self.resolve_candidates_after_sync(
+            [email], attempts=attempts, poll_delay=poll_delay
+        )
+
+    async def resolve_candidates_after_sync(
+        self,
+        identities: list[str],
+        *,
+        attempts: int = 4,
+        poll_delay: float = 1.0,
+    ) -> ResolvedSubscription:
+        """Resolve the first panel identity known to SubHub.
+
+        Older bot records can have a stale primary email while their per-server
+        mappings contain the actual 3x-ui email. Try all safe candidates but
+        trigger only one global synchronization.
+        """
+        candidates = list(
+            dict.fromkeys(value.strip().casefold() for value in identities if value.strip())
+        )
+        if not candidates:
+            raise ValueError("at least one identity is required")
+
+        async def try_candidates() -> ResolvedSubscription:
+            last_error: SubHubError | None = None
+            for candidate in candidates:
+                try:
+                    return await self.resolve(email=candidate)
+                except (SubHubNotFound, SubHubNotReady) as exc:
+                    last_error = exc
+            raise SubHubNotReady("none of the identities is ready") from last_error
+
         last_error: SubHubError | None = None
         try:
-            return await self.resolve(email=email)
-        except (SubHubNotFound, SubHubNotReady) as exc:
+            return await try_candidates()
+        except SubHubNotReady as exc:
             last_error = exc
         await self.trigger_sync()
         for attempt in range(max(1, attempts - 1)):
             if poll_delay > 0:
                 await asyncio.sleep(poll_delay * (attempt + 1))
             try:
-                return await self.resolve(email=email)
-            except (SubHubNotFound, SubHubNotReady) as exc:
+                return await try_candidates()
+            except SubHubNotReady as exc:
                 last_error = exc
         raise SubHubNotReady("subscription is still being prepared") from last_error
 
