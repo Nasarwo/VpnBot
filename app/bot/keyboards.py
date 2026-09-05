@@ -358,6 +358,8 @@ def admin_home_keyboard() -> InlineKeyboardMarkup:
                   style="success", icon="support")],
             [_btn("Антишеринг", callback_data=_adm("sharing"), style="success",
                   icon="unknown")],
+            [_btn("IP-отчёт: все пользователи", callback_data=_adm("sharing_all"),
+                  style="primary", icon="unknown")],
             [_btn(texts.BTN_BACK, callback_data=MenuCallback(action="home").pack(),
                   icon="back")],
         ]

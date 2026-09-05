@@ -397,6 +397,28 @@ async def admin_nav(
         )
         return
 
+    if action == "sharing_all":
+        if not settings.anti_sharing_enabled:
+            await _edit_panel(
+                callback, texts.sharing_disabled(),
+                keyboards.admin_back_keyboard("home"),
+            )
+            return
+        items = await antishare.list_all_statuses(session, settings)
+        report = texts.sharing_all(items)
+        # Полный отчёт может не поместиться в исходное сообщение панели.
+        # Отправляем его отдельными сообщениями, сохраняя каждую строку клиента.
+        while report:
+            chunk = report[:4096]
+            if len(report) > 4096:
+                split_at = chunk.rfind("\n")
+                if split_at > 0:
+                    chunk = chunk[:split_at]
+            await callback.message.answer(chunk)
+            report = report[len(chunk):].lstrip("\n")
+        await ui.answer_callback(callback)
+        return
+
     await ui.answer_callback(callback, "Неизвестное действие", show_alert=True)
 
 

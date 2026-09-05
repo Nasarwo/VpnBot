@@ -53,6 +53,13 @@ def test_welcome_menu_auto_admin_has_panel_and_connection():
     assert texts.BTN_BUY not in labels
 
 
+def test_admin_keyboard_has_full_ip_report_button():
+    buttons = _all_buttons(keyboards.admin_home_keyboard())
+    button = next(item for item in buttons if item.text == "IP-отчёт: все пользователи")
+
+    assert AdminCallback.unpack(button.callback_data).action == "sharing_all"
+
+
 def test_install_guides_keyboard_has_telegraph_links():
     buttons = _all_buttons(keyboards.install_guides_keyboard())
     assert buttons[0].text == texts.BTN_GUIDE_WINDOWS
