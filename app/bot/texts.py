@@ -27,6 +27,7 @@ BTN_GUIDE_WINDOWS = "Windows"
 BTN_GUIDE_ANDROID_IOS = "Android & IOS"
 BTN_PROXY_MTPROTO = "MTProto 1"
 BTN_PROXY_MTPROTO_2 = "MTProto 2"
+BTN_NEWS = "Новостной канал"
 
 INSTALL_GUIDE_WINDOWS_URL = (
     "https://telegra.ph/Gajd-po-podklyucheniyu-Windows--07062026-06-07"
@@ -403,6 +404,13 @@ def first_purchase_channel_prompt() -> str:
     return (
         "Подпишитесь на наш канал с новостями о сервисе — "
         "там публикуем важные объявления и обновления."
+    )
+
+
+def news_channel_prompt() -> str:
+    return (
+        "Присоединяйтесь к новостному каналу сервиса.\n\n"
+        "Там публикуем важные объявления, обновления и новости."
     )
 
 

@@ -364,6 +364,12 @@ async def menu_nav(
             texts.free_proxies_intro(),
             keyboards.free_proxies_keyboard(),
         )
+    elif action == "news_channel":
+        await _edit(
+            callback,
+            texts.news_channel_prompt(),
+            keyboards.news_channel_keyboard(back_action="home"),
+        )
     elif action == "support":
         await _edit(
             callback,

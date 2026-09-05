@@ -35,11 +35,13 @@ def test_welcome_menu_active_vs_inactive():
     assert inactive[0].text == texts.BTN_BUY
     assert inactive[1].text == texts.BTN_INSTALL
     assert inactive[2].text == texts.BTN_FREE_PROXIES
+    assert inactive[3].text == texts.BTN_NEWS
+    assert inactive[3].style == "primary"
     # Поддержка всегда зелёная
-    assert inactive[3].text == texts.BTN_SUPPORT
-    assert inactive[3].style == "success"
-    assert inactive[4].text == texts.BTN_RESET
-    assert inactive[4].style == "danger"
+    assert inactive[4].text == texts.BTN_SUPPORT
+    assert inactive[4].style == "success"
+    assert inactive[5].text == texts.BTN_RESET
+    assert inactive[5].style == "danger"
 
 
 def test_welcome_menu_auto_admin_has_panel_and_connection():
@@ -97,6 +99,15 @@ def test_welcome_menu_free_proxies_has_icon():
     proxy_btn = inactive[2]
     assert proxy_btn.text == texts.BTN_FREE_PROXIES
     assert proxy_btn.icon_custom_emoji_id == emoji.custom_emoji_id("globe")
+
+
+def test_welcome_menu_has_news_channel_button():
+    buttons = _all_buttons(keyboards.welcome_menu(False))
+    button = next(item for item in buttons if item.text == texts.BTN_NEWS)
+
+    assert MenuCallback.unpack(button.callback_data).action == "news_channel"
+    assert button.style == "primary"
+    assert button.icon_custom_emoji_id == emoji.custom_emoji_id("globe")
 
 
 def test_purchase_keyboard_trial_visibility():

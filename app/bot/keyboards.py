@@ -140,13 +140,19 @@ def welcome_menu(has_access: bool, is_admin: bool = False) -> InlineKeyboardMark
         callback_data=MenuCallback(action="free_proxies").pack(),
         icon="globe",
     )
+    news_channel = _btn(
+        texts.BTN_NEWS,
+        callback_data=MenuCallback(action="news_channel").pack(),
+        style="primary",
+        icon="globe",
+    )
     reset = _btn(
         texts.BTN_RESET,
         callback_data=MenuCallback(action="reset").pack(),
         style="danger",
         icon="cancel",
     )
-    rows.extend([[install], [free_proxies], [support], [reset]])
+    rows.extend([[install], [free_proxies], [news_channel], [support], [reset]])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -221,19 +227,21 @@ def free_proxies_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def news_channel_keyboard() -> InlineKeyboardMarkup:
+def news_channel_keyboard(back_action: str | None = None) -> InlineKeyboardMarkup:
     """Кнопка подписки на канал с новостями."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                _btn(
-                    texts.BTN_NEWS_CHANNEL,
-                    url=texts.NEWS_CHANNEL_URL,
-                    style="primary",
-                )
-            ]
+    rows = [
+        [
+            _btn(
+                texts.BTN_NEWS_CHANNEL,
+                url=texts.NEWS_CHANNEL_URL,
+                style="success",
+                icon="globe",
+            )
         ]
-    )
+    ]
+    if back_action:
+        rows.append([_back_button(back_action)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def subscription_menu() -> InlineKeyboardMarkup:
