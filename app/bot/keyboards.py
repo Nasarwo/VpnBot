@@ -144,7 +144,7 @@ def welcome_menu(has_access: bool, is_admin: bool = False) -> InlineKeyboardMark
         texts.BTN_NEWS,
         callback_data=MenuCallback(action="news_channel").pack(),
         style="primary",
-        icon="globe",
+        icon="server",
     )
     reset = _btn(
         texts.BTN_RESET,
@@ -235,7 +235,7 @@ def news_channel_keyboard(back_action: str | None = None) -> InlineKeyboardMarku
                 texts.BTN_NEWS_CHANNEL,
                 url=texts.NEWS_CHANNEL_URL,
                 style="success",
-                icon="globe",
+                icon="server",
             )
         ]
     ]

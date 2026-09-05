@@ -107,7 +107,7 @@ def test_welcome_menu_has_news_channel_button():
 
     assert MenuCallback.unpack(button.callback_data).action == "news_channel"
     assert button.style == "primary"
-    assert button.icon_custom_emoji_id == emoji.custom_emoji_id("globe")
+    assert button.icon_custom_emoji_id == emoji.custom_emoji_id("server")
 
 
 def test_purchase_keyboard_trial_visibility():
