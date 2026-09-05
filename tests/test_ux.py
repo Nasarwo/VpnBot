@@ -116,18 +116,13 @@ def test_connection_keyboard_uses_copy_text():
     assert happ_buttons[0].url == "https://sub.example/happ/add/ABCD1234"
 
 
-def test_connection_keyboard_adds_ru_proxy_buttons():
+def test_connection_keyboard_does_not_add_legacy_ru_proxy_buttons():
     markup = keyboards.connection_keyboard(
         "https://sub.example/connection/ABCD1234",
         "https://sub.example/happ/add/ABCD1234",
-        "https://enderworld.org/sub/public-id",
-        "https://sub.example/happ/import/payload/signature",
     )
     buttons = _all_buttons(markup)
-    ru_copy = next(button for button in buttons if button.text == "Через 🇷🇺")
-    ru_happ = next(button for button in buttons if button.text == "Через 🇷🇺 (Happ)")
-    assert ru_copy.copy_text.text == "https://enderworld.org/sub/public-id"
-    assert ru_happ.url == "https://sub.example/happ/import/payload/signature"
+    assert all(button.text not in {"Через 🇷🇺", "Через 🇷🇺 (Happ)"} for button in buttons)
 
 
 def test_connection_keyboard_without_url_only_back():

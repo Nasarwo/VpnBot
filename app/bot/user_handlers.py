@@ -27,7 +27,6 @@ from app.services.subhub_client import (
     SubHubClient,
     SubHubError,
     SubHubNotReady,
-    build_happ_import_url,
     trigger_configured_sync,
 )
 from app.services.subscription_link import (
@@ -287,30 +286,6 @@ async def menu_nav(
             return
         back_action = "home" if action == "connect_home" else "subscription"
         servers = await ServerRepository(session).list_enabled()
-        ru_server = next(
-            (
-                server
-                for server in servers
-                if server.kind == "ru_proxy" and server.subscription_base
-            ),
-            None,
-        )
-        ru_subscription_url = None
-        ru_happ_url = None
-        if ru_server and db_user.public_id:
-            base = ru_server.subscription_base
-            ru_subscription_url = (
-                (base if base.endswith("/") else base + "/") + db_user.public_id
-            )
-            if settings.subhub_url and settings.subhub_admin_token:
-                try:
-                    ru_happ_url = build_happ_import_url(
-                        settings.subhub_url,
-                        settings.subhub_admin_token,
-                        ru_subscription_url,
-                    )
-                except ValueError:
-                    logger.warning("Unable to build RU proxy Happ URL")
         identities = []
         if client:
             identities.extend(
@@ -327,8 +302,6 @@ async def menu_nav(
                 texts.connection_unavailable(),
                 keyboards.connection_keyboard(
                     None,
-                    ru_subscription_url=ru_subscription_url,
-                    ru_happ_url=ru_happ_url,
                     back_action=back_action,
                 ),
             )
@@ -349,8 +322,6 @@ async def menu_nav(
                     texts.connection_preparing(),
                     keyboards.connection_keyboard(
                         None,
-                        ru_subscription_url=ru_subscription_url,
-                        ru_happ_url=ru_happ_url,
                         back_action=back_action,
                     ),
                 )
@@ -361,8 +332,6 @@ async def menu_nav(
                     texts.connection_unavailable(),
                     keyboards.connection_keyboard(
                         None,
-                        ru_subscription_url=ru_subscription_url,
-                        ru_happ_url=ru_happ_url,
                         back_action=back_action,
                     ),
                 )
@@ -373,8 +342,6 @@ async def menu_nav(
                     keyboards.connection_keyboard(
                         resolved.subscription_url,
                         resolved.happ_url,
-                        ru_subscription_url,
-                        ru_happ_url,
                         back_action=back_action,
                     ),
                 )

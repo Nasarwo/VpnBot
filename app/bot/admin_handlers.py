@@ -1064,10 +1064,25 @@ async def sharing_report(
         await message.answer(texts.sharing_summary(flagged))
         return
 
+    if args.lower() in {"all", "все"}:
+        items = await antishare.list_all_statuses(session, settings)
+        report = texts.sharing_all(items)
+        # Telegram ограничивает сообщение 4096 символами; не теряем клиентов
+        # в длинном отчёте.
+        while report:
+            chunk = report[:4096]
+            if len(report) > 4096:
+                split_at = chunk.rfind("\n")
+                if split_at > 0:
+                    chunk = chunk[:split_at]
+            await message.answer(chunk)
+            report = report[len(chunk):].lstrip("\n")
+        return
+
     try:
         telegram_id = int(args.split()[0])
     except ValueError:
-        await message.answer("Использование: /sharing [telegram_id]")
+        await message.answer("Использование: /sharing [telegram_id|all]")
         return
 
     target = await UserRepository(session).get_by_telegram_id(telegram_id)

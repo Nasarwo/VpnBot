@@ -218,3 +218,46 @@ async def list_flagged(
     order = {LEVEL_CRITICAL: 0, LEVEL_WARN: 1, LEVEL_OK: 2}
     flagged.sort(key=lambda item: (order[item[1].level], -item[1].unique_24h))
     return flagged
+
+
+async def list_all_statuses(
+    session: AsyncSession,
+    settings: Settings,
+    now: datetime | None = None,
+) -> list[tuple[VpnClient, SharingStatus]]:
+    """Возвращает IP-статус каждого VPN-клиента, включая клиентов без IP-логов."""
+    now = now or _utcnow()
+    result = await session.execute(
+        select(VpnClient).options(selectinload(VpnClient.user))
+    )
+    clients = list(result.scalars().all())
+    counts_by_client = {client.id: {} for client in clients}
+
+    for label, window in WINDOWS.items():
+        counts = await session.execute(
+            select(
+                IpObservation.vpn_client_id,
+                func.count(func.distinct(IpObservation.ip)),
+            )
+            .where(IpObservation.observed_at >= now - window)
+            .group_by(IpObservation.vpn_client_id)
+        )
+        for client_id, count in counts.all():
+            if client_id in counts_by_client:
+                counts_by_client[client_id][label] = int(count)
+
+    items = [
+        (
+            client,
+            SharingStatus(
+                vpn_client_id=client.id,
+                counts=counts_by_client[client.id],
+                level=_level_for(counts_by_client[client.id], settings),
+            ),
+        )
+        for client in clients
+    ]
+    # Вручную просматривать удобнее с наиболее необычных значений.
+    order = {LEVEL_CRITICAL: 0, LEVEL_WARN: 1, LEVEL_OK: 2}
+    items.sort(key=lambda item: (order[item[1].level], -item[1].unique_24h))
+    return items

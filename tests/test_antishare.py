@@ -138,3 +138,15 @@ async def test_list_flagged(
     client, status = flagged[0]
     assert client.id == vpn_client.id
     assert status.level == antishare.LEVEL_CRITICAL
+
+
+async def test_list_all_statuses_includes_client_without_observations(
+    session: AsyncSession, user: User, vpn_client: VpnClient
+):
+    items = await antishare.list_all_statuses(session, _settings(), now=utcnow())
+
+    assert len(items) == 1
+    client, status = items[0]
+    assert client.id == vpn_client.id
+    assert status.counts == {}
+    assert status.level == antishare.LEVEL_OK

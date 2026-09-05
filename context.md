@@ -170,7 +170,7 @@ Trial выдается один раз на аккаунт (`User.trial_used`) �
 - `/pending` - ожидающие заявки.
 - `/confirm <id>`, `/reject <id>` - подтверждение/отклонение платежа.
 - `/confirmbind <id>`, `/rejectbind <id>` - обработка legacy bind-заявок.
-- `/sharing`, `/ipscan` - антишеринг-отчеты и сбор IP.
+- `/sharing`, `/sharing all`, `/ipscan` - антишеринг-отчеты и сбор IP.
 - `/servers` - список серверов.
 - `/renameserver <server_id> <новое название>` - переименовать сервер без удаления.
 - `/setsubscriptionurl <server_id> <URL или ->` - изменить или удалить URL подписки.

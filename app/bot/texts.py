@@ -539,6 +539,24 @@ def sharing_summary(items: list) -> str:
     return "\n".join(lines)
 
 
+def sharing_all(items: list) -> str:
+    """Полный краткий отчёт по IP-наблюдениям всех VPN-клиентов."""
+    if not items:
+        return "VPN-клиентов для IP-отчёта пока нет."
+    lines = ["Антишеринг: все клиенты, уникальные IP (за 24 ч):\n"]
+    for client, status in items:
+        user = client.user
+        username = f"@{user.username}" if user and user.username else "—"
+        pid = (user.public_id if user else None) or "—"
+        lines.append(
+            f"{sharing_level_label(status.level).upper()} — {username} (ID {pid}) — "
+            f"24ч: {status.unique_24h}; 1ч: {status.counts.get('1h', 0)}; "
+            f"7д: {status.counts.get('7d', 0)}"
+        )
+    lines.append("\nДетали: /sharing <telegram_id>")
+    return "\n".join(lines)
+
+
 def sharing_detail(
     user: User | None,
     status,
