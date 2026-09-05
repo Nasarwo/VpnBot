@@ -289,6 +289,16 @@ async def test_get_client_ips_quotes_email_path_segment(httpx_mock: HTTPXMock):
     assert f"{BASE}/panel/api/clients/ips/e%40local%2Fwith-slash" in requested_urls
 
 
+def test_parse_ips_extracts_ip_from_panel_log_objects():
+    assert XuiClient._parse_ips(
+        [
+            {"ip": "176.195.161.157", "time": "2026-09-05 22:59:46", "node": ""},
+            {"ip": "2001:db8::1", "time": "2026-09-05 23:00:00"},
+            {"ip": "not-an-ip", "time": "2026-09-05 23:01:00"},
+        ]
+    ) == ["176.195.161.157", "2001:db8::1"]
+
+
 async def test_del_client_quotes_identifier_path_segment(httpx_mock: HTTPXMock):
     _mock_csrf(httpx_mock)
     httpx_mock.add_response(

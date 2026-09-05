@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 from typing import Any
@@ -729,21 +730,41 @@ class XuiClient:
 
     @staticmethod
     def _parse_ips(obj: object) -> list[str]:
+        """Извлекает IP из вариантов ответа 3x-ui, не сохраняя метаданные лога."""
+        values: list[object]
         if obj is None:
             return []
         if isinstance(obj, list):
-            return [str(ip).strip() for ip in obj if str(ip).strip()]
-        if isinstance(obj, str):
+            values = obj
+        elif isinstance(obj, dict):
+            # Некоторые версии панели отдают список объектов
+            # {"ip": "1.2.3.4", "time": "...", "node": "..."}.
+            values = [obj.get("ip")]
+        elif isinstance(obj, str):
             text = obj.strip()
             if not text or text.lower().startswith("no ip record"):
                 return []
             # Пытаемся распарсить JSON-массив, иначе делим по разделителям.
             try:
                 parsed = json.loads(text)
-                if isinstance(parsed, list):
-                    return [str(ip).strip() for ip in parsed if str(ip).strip()]
+                if isinstance(parsed, (list, dict)):
+                    return XuiClient._parse_ips(parsed)
             except json.JSONDecodeError:
                 pass
-            parts = text.replace(",", "\n").split("\n")
-            return [p.strip() for p in parts if p.strip()]
-        return []
+            values = text.replace(",", "\n").split("\n")
+        else:
+            return []
+
+        ips: list[str] = []
+        for value in values:
+            if isinstance(value, dict):
+                value = value.get("ip")
+            if not isinstance(value, str):
+                continue
+            candidate = value.strip()
+            try:
+                ips.append(str(ipaddress.ip_address(candidate)))
+            except ValueError:
+                # Журналы панелей могут содержать произвольные служебные строки.
+                continue
+        return ips
