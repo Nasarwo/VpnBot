@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     subhub_admin_token: str = ""
     subhub_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
     subhub_resolve_attempts: int = Field(default=4, ge=1, le=10)
+    web_bridge_token: str = ""
+    web_bridge_host: str = "127.0.0.1"
+    web_bridge_port: int = 8090
 
     # Уровень логирования приложения: DEBUG/INFO/WARNING/ERROR
     log_level: str = "INFO"

@@ -396,6 +396,20 @@ async def _reset_bot_user(
     state: FSMContext,
 ) -> None:
     """Удаляет данные пользователя в боте и показывает онбординг заново."""
+    from sqlalchemy import select
+
+    from app.db.models import WebAccount
+
+    linked = await session.scalar(
+        select(WebAccount.id).where(WebAccount.user_id == db_user.id)
+    )
+    if linked is not None:
+        await ui.answer_callback(
+            callback,
+            "Аккаунт связан с сайтом. Для сброса обратитесь в поддержку.",
+            show_alert=True,
+        )
+        return
     await state.clear()
     telegram_id = db_user.telegram_id
     username = db_user.username

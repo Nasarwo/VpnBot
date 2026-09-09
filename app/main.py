@@ -17,6 +17,7 @@ from app.logging_config import setup_logging
 from app.services import antishare, expiry, health
 from app.services.ip_provider import build_ip_provider
 from app.services.subhub_client import trigger_configured_sync
+from app.services.web_bridge import delivery_loop, start_bridge
 from app.services.xui_updater import build_updater
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,9 @@ async def run() -> None:
     logger.info("Бот запускается (admins=%s)", settings.admin_telegram_ids)
 
     background_tasks: list[asyncio.Task] = []
+    web_runner = await start_bridge(bot, settings)
+    if web_runner:
+        background_tasks.append(asyncio.create_task(delivery_loop(bot)))
     if settings.anti_sharing_enabled and settings.anti_sharing_poll_minutes > 0:
         background_tasks.append(asyncio.create_task(_anti_sharing_poller(settings)))
         logger.info(
@@ -183,6 +187,9 @@ async def run() -> None:
     finally:
         for task in background_tasks:
             task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
+        if web_runner:
+            await web_runner.cleanup()
         await bot.session.close()
 
 

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import secrets
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.enums import AttachmentType, PaymentStatus
-from app.db.models import PaymentAttachment, PaymentRequest
+from app.db.models import PaymentAttachment, PaymentRequest, User
 from app.db.repositories import PaymentRepository
 from app.services import audit
 
@@ -26,9 +27,17 @@ async def create_request(
 ) -> PaymentRequest:
     """Создаёт заявку на продление и переводит её в ожидание проверки админом."""
     repo = PaymentRepository(session)
+    await session.execute(select(User).where(User.id == user_id).with_for_update())
 
     existing = await repo.latest_open_for_user(user_id)
     if existing is not None:
+        proof = await session.scalar(
+            select(PaymentAttachment.id)
+            .where(PaymentAttachment.payment_request_id == existing.id)
+            .limit(1)
+        )
+        if proof is not None:
+            return existing
         changed = False
         if float(existing.amount) != float(amount):
             existing.amount = amount

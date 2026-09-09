@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.enums import PaymentStatus
@@ -444,7 +445,10 @@ async def grant_trial(
     обновления панелей транзакция откатывается, и пользователь может попробовать снова.
     """
     now = now or _utcnow()
-    user = await session.get(User, user_id)
+    user = await session.scalar(
+        select(User).where(User.id == user_id).with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if user is None:
         raise BillingError("Пользователь не найден")
     logger.info(

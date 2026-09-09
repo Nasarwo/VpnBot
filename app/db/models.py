@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,8 +32,8 @@ class User(Base, TimestampMixin):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    telegram_id: Mapped[int] = mapped_column(
-        BigInteger, unique=True, index=True, nullable=False
+    telegram_id: Mapped[int | None] = mapped_column(
+        BigInteger, unique=True, index=True, nullable=True
     )
     public_id: Mapped[str | None] = mapped_column(
         String(32), unique=True, index=True, nullable=True
@@ -63,6 +64,64 @@ class User(Base, TimestampMixin):
     )
 
 
+class WebAccount(Base):
+    __tablename__ = "web_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), unique=True
+    )
+    email: Mapped[str] = mapped_column(String(254), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    verified: Mapped[bool] = mapped_column(Boolean, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WebLinkRequest(Base):
+    __tablename__ = "web_link_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("web_accounts.id", ondelete="CASCADE"))
+    target_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class WebToken(Base):
+    __tablename__ = "web_tokens"
+
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("web_accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    purpose: Mapped[str] = mapped_column(String(16), primary_key=True)
+    digest: Mapped[str] = mapped_column(String(64))
+    attempts: Mapped[int] = mapped_column(Integer, server_default="0")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WebSession(Base):
+    __tablename__ = "web_sessions"
+
+    digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("web_accounts.id", ondelete="CASCADE"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WebDelivery(Base):
+    """Durable per-admin Telegram delivery, retried independently of HTTP requests."""
+
+    __tablename__ = "web_deliveries"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    admin_id: Mapped[int] = mapped_column(BigInteger)
+    payload: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
+
+
 class VpnClient(Base):
     __tablename__ = "vpn_clients"
     __table_args__ = (UniqueConstraint("user_id", name="uq_vpn_clients_user_id"),)
@@ -76,9 +135,7 @@ class VpnClient(Base):
     external_client_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     subscription_url_direct: Mapped[str | None] = mapped_column(Text, nullable=True)
     subscription_url_ru_proxy: Mapped[str | None] = mapped_column(Text, nullable=True)
-    expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Стадия отправленных уведомлений об окончании текущего срока:
     # 0 — ничего, 1 — «за день», 2 — «за час», 3 — «истекла».
@@ -111,9 +168,7 @@ class Server(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # Результат фоновой проверки доступности панели: None — ещё не проверялся.
     is_online: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    last_checked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )
@@ -206,21 +261,15 @@ class PaymentRequest(Base):
         index=True,
         nullable=False,
     )
-    payment_code: Mapped[str] = mapped_column(
-        String(32), unique=True, index=True, nullable=False
-    )
+    payment_code: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
     admin_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )
-    confirmed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    applied_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Целевой срок доступа, зафиксированный до обновления панелей (для идемпотентного retry).
     target_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -250,9 +299,7 @@ class PaymentAttachment(Base):
         DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )
 
-    payment_request: Mapped[PaymentRequest] = relationship(
-        back_populates="attachments"
-    )
+    payment_request: Mapped[PaymentRequest] = relationship(back_populates="attachments")
 
 
 class BindRequest(Base):
@@ -266,9 +313,7 @@ class BindRequest(Base):
     )
     subscription_link: Mapped[str] = mapped_column(Text, nullable=False)
     public_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    request_code: Mapped[str] = mapped_column(
-        String(32), unique=True, index=True, nullable=False
-    )
+    request_code: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
     status: Mapped[BindRequestStatus] = mapped_column(
         Enum(BindRequestStatus, native_enum=False, length=16),
         default=BindRequestStatus.WAITING_ADMIN,
@@ -280,9 +325,7 @@ class BindRequest(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )
-    processed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped[User] = relationship(back_populates="bind_requests")
 
@@ -317,19 +360,13 @@ class PendingServerUpdate(Base, TimestampMixin):
     payment_request_id: Mapped[int | None] = mapped_column(
         ForeignKey("payment_requests.id", ondelete="SET NULL"), index=True, nullable=True
     )
-    target_expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
+    target_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), default="pending", nullable=False, server_default="pending"
     )
-    attempts: Mapped[int] = mapped_column(
-        Integer, default=0, nullable=False, server_default="0"
-    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    next_retry_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     vpn_client: Mapped[VpnClient] = relationship()
     server: Mapped[Server] = relationship()

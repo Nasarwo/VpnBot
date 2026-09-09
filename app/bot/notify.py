@@ -55,11 +55,13 @@ async def forward_proof_to_admins(
 
 async def notify_user_extended(
     bot: Bot,
-    telegram_id: int,
+    telegram_id: int | None,
     client: VpnClient,
     *,
     first_purchase: bool = False,
 ) -> None:
+    if telegram_id is None:
+        return
     try:
         await bot.send_message(
             telegram_id, texts.access_extended(client), parse_mode="HTML"
@@ -141,7 +143,9 @@ async def notify_user_bind_rejected(
         logger.warning("Не удалось уведомить пользователя %s", telegram_id)
 
 
-async def notify_user_subscription_deleted(bot: Bot, telegram_id: int) -> None:
+async def notify_user_subscription_deleted(bot: Bot, telegram_id: int | None) -> None:
+    if telegram_id is None:
+        return
     try:
         await bot.send_message(telegram_id, texts.subscription_deleted_by_admin())
     except TelegramAPIError:
@@ -171,8 +175,10 @@ async def notify_admins_bind_failed(
 
 
 async def notify_user_rejected(
-    bot: Bot, telegram_id: int, payment_code: str
+    bot: Bot, telegram_id: int | None, payment_code: str
 ) -> None:
+    if telegram_id is None:
+        return
     try:
         await bot.send_message(
             telegram_id, texts.payment_rejected(payment_code), parse_mode="HTML"
