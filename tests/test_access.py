@@ -36,19 +36,19 @@ def test_unlimited_client_requires_server_mapping():
     ) == UserRole.USER
 
 
-def test_unlimited_bound_client_gets_access_and_admin_role():
-    client = VpnClient(user_id=1, expires_at=None, mappings=[_mapping()])
+def test_unlimited_bound_client_gets_access_without_admin_role():
+    client = VpnClient(user_id=1, expires_at=None, is_active=True, mappings=[_mapping()])
 
     assert access.has_active_timed_client(client) is False
     assert access.has_unlimited_bound_client(client) is True
     assert access.has_client_access(client) is True
     assert access.resolve_effective_role(
         Settings(admin_telegram_ids=[]), 100, client
-    ) == UserRole.ADMIN
+    ) == UserRole.USER
 
 
 def test_timed_client_gets_access_without_auto_admin_role():
-    client = VpnClient(user_id=1, expires_at=utcnow() + timedelta(days=5))
+    client = VpnClient(user_id=1, expires_at=utcnow() + timedelta(days=5), is_active=True)
 
     assert access.has_active_timed_client(client) is True
     assert access.has_unlimited_bound_client(client) is False

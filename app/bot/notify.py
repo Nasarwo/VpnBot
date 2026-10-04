@@ -59,12 +59,16 @@ async def notify_user_extended(
     client: VpnClient,
     *,
     first_purchase: bool = False,
+    pending_servers: int = 0,
 ) -> None:
     if telegram_id is None:
         return
     try:
         await bot.send_message(
-            telegram_id, texts.access_extended(client), parse_mode="HTML"
+            telegram_id,
+            texts.access_update_pending(client, pending_servers)
+            if pending_servers else texts.access_extended(client),
+            parse_mode="HTML",
         )
     except TelegramAPIError:
         logger.warning("Не удалось уведомить пользователя %s", telegram_id)

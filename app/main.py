@@ -14,7 +14,7 @@ from app.bot.router import build_root_router
 from app.config import Settings, get_settings
 from app.db.session import get_sessionmaker
 from app.logging_config import setup_logging
-from app.services import antishare, expiry, health
+from app.services import antishare, billing, expiry, health
 from app.services.ip_provider import build_ip_provider
 from app.services.subhub_client import trigger_configured_sync
 from app.services.web_bridge import delivery_loop, start_bridge
@@ -65,6 +65,7 @@ async def _server_health_poller(settings: Settings) -> None:
     while True:
         try:
             async with sessionmaker() as session:
+                await billing.recover_confirmed_payments(session, updater)
                 await health.check_servers(
                     session,
                     timeout=timeout,

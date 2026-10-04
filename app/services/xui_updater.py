@@ -54,9 +54,21 @@ class XuiPanelUpdater:
         )
         async with self._client(server) as client:
             try:
+                # Validate the configured targets before any panel mutation.
+                live = {item["id"]: item for item in await client.list_inbounds()}
+                unavailable = [
+                    i for i in inbound_ids
+                    if i not in live or live[i].get("enable") is False
+                ]
+                if not inbound_ids or unavailable:
+                    raise XuiError(
+                        f"Недоступные inbound на сервере {server.id}: {unavailable}. "
+                        f"Обновите список командой /importinbounds {server.id}"
+                    )
                 if await client.supports_clients_api():
                     await self._provision_new(
-                        client, spec, inbound_ids, flow, expiry_ms
+                        client, spec, inbound_ids, flow, expiry_ms,
+                        live_inbound_ids=set(live),
                     )
                 else:
                     await self._provision_legacy(
@@ -75,6 +87,8 @@ class XuiPanelUpdater:
         inbound_ids: list[int],
         flow: str | None,
         expiry_ms: int,
+        *,
+        live_inbound_ids: set[int] | None = None,
     ) -> None:
         existing_record = await client.get_client_record(spec.email)
         if (
@@ -92,6 +106,7 @@ class XuiPanelUpdater:
                 sub_id=spec.sub_id,
                 expiry_ms=expiry_ms,
                 flow=flow,
+                tg_id=spec.telegram_id or 0,
             )
             await client.create_client_record(client_obj, inbound_ids)
             return
@@ -108,16 +123,25 @@ class XuiPanelUpdater:
             sub_id=spec.sub_id,
             expiry_ms=expiry_ms,
             flow=flow,
+            tg_id=spec.telegram_id,
         )
         existing_inbound_ids = [
             int(i)
             for i in (existing_record.get("inboundIds") or [])
-            if isinstance(i, int)
+            if isinstance(i, int) and (live_inbound_ids is None or i in live_inbound_ids)
         ]
         merged_inbound_ids = sorted(set(existing_inbound_ids) | set(inbound_ids))
         await client.update_client_record(
             panel_email, client_obj, inbound_ids=merged_inbound_ids
         )
+        missing = sorted(set(inbound_ids) - set(existing_inbound_ids))
+        if missing:
+            await client.attach_client_record(panel_email, missing)
+            verified = await client.get_client_record(panel_email)
+            if verified is None or not set(inbound_ids).issubset(
+                set(verified.get("inboundIds") or [])
+            ):
+                raise XuiError(f"Панель не подтвердила inbound-привязки клиента {panel_email}")
 
     async def _provision_legacy(
         self, client: XuiClient, spec: ServerProvision, expiry_ms: int
@@ -144,6 +168,7 @@ class XuiPanelUpdater:
                     email=email,
                     expiry_ms=expiry_ms,
                     identifier=identifier,
+                    tg_id=spec.telegram_id,
                 )
                 continue
             client_obj = build_client_object(
@@ -155,6 +180,7 @@ class XuiPanelUpdater:
                 expiry_ms=expiry_ms,
                 flow=inbound.flow,
                 method=inbound.method,
+                tg_id=str(spec.telegram_id) if spec.telegram_id is not None else "",
             )
             await client.add_client(inbound.inbound_id, client_obj)
 

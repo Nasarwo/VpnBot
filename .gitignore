@@ -34,6 +34,7 @@ panel_*.html
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+graphify-out/cache/last_query_stamp
 .coverage
 htmlcov/
 

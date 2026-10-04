@@ -52,7 +52,7 @@ async def check_servers(
         online = await check_server(server, timeout=timeout)
         await repo.set_status(server.id, online)
         result[server.id] = online
-        if online and updater is not None:
+        if online and server.enabled and updater is not None:
             try:
                 pending_results = await pending_updates.apply_pending_for_server(
                     session, server.id, updater

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from app.db.enums import Protocol
@@ -71,6 +72,7 @@ def build_client_record(
     flow: str | None = None,
     limit_ip: int = 0,
     total_gb: int = 0,
+    tg_id: int = 0,
 ) -> dict[str, object]:
     """Унифицированный объект клиента для нового client-API (3x-ui >= 3.2.x).
 
@@ -89,7 +91,7 @@ def build_client_record(
         "expiryTime": expiry_ms,
         "limitIp": limit_ip,
         "totalGB": total_gb,
-        "tgId": 0,
+        "tgId": tg_id,
         "reset": 0,
     }
     if flow:
@@ -138,6 +140,7 @@ def merge_client_record_for_update(
     expiry_ms: int,
     enable: bool = True,
     flow: str | None = None,
+    tg_id: int | None = None,
 ) -> dict[str, Any]:
     """Тело ``clients/update``: сохраняет секреты панели, меняет срок и enable.
 
@@ -149,6 +152,8 @@ def merge_client_record_for_update(
     merged["subId"] = sub_id
     merged["enable"] = enable
     merged["expiryTime"] = expiry_ms
+    if tg_id is not None:
+        merged["tgId"] = tg_id
     if flow and not merged.get("flow"):
         merged["flow"] = flow
     return sanitize_client_for_api(merged)
@@ -168,7 +173,10 @@ _CLIENT_API_FIELDS = frozenset(
         "tgId",
         "reset",
         "flow",
-        "method",
+        "method", "security", "limitHwid", "group", "comment", "resetDay",
+        "resetWeekday", "resetMax", "trafficReset", "trafficResetDay", "reverse",
+        "privateKey", "publicKey", "allowedIPs", "preSharedKey", "keepAlive",
+        "forwardedPorts", "secret", "adTag",
     }
 )
 
@@ -193,6 +201,19 @@ def sanitize_client_for_api(body: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {
         key: body[key] for key in _CLIENT_API_FIELDS if key in body
     }
+    # ClientRecord stores tunnel IPs as text; model.Client expects an array.
+    ips = result.get("allowedIPs")
+    if isinstance(ips, str):
+        if ips.strip().startswith("["):
+            decoded = json.loads(ips)
+            if not isinstance(decoded, list) or not all(isinstance(ip, str) for ip in decoded):
+                raise ValueError("Invalid stored allowedIPs")
+            result["allowedIPs"] = decoded
+        else:
+            result["allowedIPs"] = [ip.strip() for ip in ips.split(",") if ip.strip()]
+    reverse = result.get("reverse")
+    if isinstance(reverse, str):
+        result["reverse"] = json.loads(reverse) if reverse.strip() else None
     uuid_str = _client_uuid_for_api(body)
     if uuid_str:
         result["id"] = uuid_str

@@ -222,7 +222,7 @@ async def test_user_role_is_recomputed_from_unlimited_client(
     await session.commit()
 
     refreshed = await UserRepository(session).get_by_telegram_id(user.telegram_id)
-    assert refreshed.role == UserRole.ADMIN
+    assert refreshed.role == UserRole.USER
 
 
 async def test_user_role_downgrades_when_unlimited_mapping_is_removed(

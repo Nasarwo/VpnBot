@@ -400,6 +400,15 @@ def access_extended(client: VpnClient) -> str:
     )
 
 
+def access_update_pending(client: VpnClient, pending_servers: int) -> str:
+    return (
+        "Оплата учтена.\n"
+        f"Срок подписки сохранён до {_fmt_date(client.expires_at)}.\n\n"
+        f"Обновление серверов ещё выполняется: {pending_servers}. "
+        "Часть подключений может быть недоступна. Повторно оплачивать не нужно."
+    )
+
+
 def first_purchase_channel_prompt() -> str:
     return (
         "Подпишитесь на наш канал с новостями о сервисе — "
@@ -457,6 +466,8 @@ def admin_payment_card(payment: PaymentRequest, user: User) -> str:
     amount = int(payment.amount) if payment.amount == int(payment.amount) else payment.amount
     status = escape(STATUS_LABELS.get(payment.status, payment.status.value))
     pid = f"<code>{escape(user.public_id)}</code>" if user.public_id else "—"
+    if payment.status == PaymentStatus.APPLIED and payment.last_error:
+        status = "оплата учтена, ожидается синхронизация серверов"
     text = (
         f"Новая заявка <code>{escape(payment.payment_code)}</code>\n\n"
         f"Пользователь: {username}\n"
@@ -826,6 +837,7 @@ def admin_import_inbounds(
     added = [s for s in summary if s[2] == "added"]
     exists = [s for s in summary if s[2] == "exists"]
     skipped = [s for s in summary if s[2] == "skipped"]
+    disabled = [s for s in summary if s[2] == "disabled"]
     lines = [f"Импорт inbound'ов сервера #{server_id}:"]
     if added:
         lines.append("Добавлены:")
@@ -839,6 +851,11 @@ def admin_import_inbounds(
         lines.append(
             "Пропущены (протокол не поддержан): "
             + ", ".join(f"{iid}/{proto}" for iid, proto, _ in skipped)
+        )
+    if disabled:
+        lines.append(
+            "Отключены (удалены или выключены в панели): "
+            + ", ".join(str(iid) for iid, _, _ in disabled)
         )
     lines.append(
         "\nДля vless+reality при необходимости задайте flow вручную через "

@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -389,6 +389,7 @@ class PaymentRepository:
             select(PaymentRequest)
             .where(PaymentRequest.id == payment_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
 
@@ -664,7 +665,12 @@ class PendingServerUpdateRepository:
             select(PendingServerUpdate)
             .where(PendingServerUpdate.server_id == server_id)
             .where(PendingServerUpdate.status == "pending")
+            .where(or_(
+                PendingServerUpdate.next_retry_at.is_(None),
+                PendingServerUpdate.next_retry_at <= _utcnow(),
+            ))
             .order_by(PendingServerUpdate.id.asc())
+            .limit(100)
         )
         return list(result.scalars().all())
 

@@ -55,6 +55,7 @@ class ServerProvision:
     client_uuid: str
     password: str
     inbounds: list[ProvisionInbound]
+    telegram_id: int | None = None
 
 
 class PanelUpdater(TypingProtocol):

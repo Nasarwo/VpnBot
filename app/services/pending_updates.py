@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,7 @@ from app.db.repositories import (
     ServerRepository,
 )
 from app.services import audit, provisioning
+from app.services.operation_lock import serialized_access
 from app.services.panel_updater import PanelUpdateError, PanelUpdater, ServerUpdateResult
 
 logger = logging.getLogger(__name__)
@@ -73,11 +74,15 @@ async def apply_pending_for_server(
     return results
 
 
+@serialized_access("update", "pending")
 async def apply_pending_update(
     session: AsyncSession,
     update: PendingServerUpdate,
     updater: PanelUpdater,
 ) -> PendingApplyResult:
+    if update.status != "pending":
+        return PendingApplyResult(update_id=update.id, server_id=update.server_id,
+                                  ok=update.status == "applied", error=update.last_error)
     server = await ServerRepository(session).get_with_inbounds(update.server_id)
     client = await session.get(VpnClient, update.vpn_client_id)
     if server is None or client is None:
@@ -91,12 +96,24 @@ async def apply_pending_update(
             error=update.last_error,
         )
 
+    if not server.enabled:
+        return PendingApplyResult(
+            update_id=update.id, server_id=server.id, ok=False,
+            error="server disabled",
+        )
+
     expiry = _as_aware(update.target_expires_at)
+    if client.expires_at is not None:
+        # A delayed older purchase must never shorten a newer paid subscription.
+        expiry = max(expiry, _as_aware(client.expires_at))
     try:
         await _apply_to_server(session, client, server, expiry, updater)
     except PanelUpdateError as exc:
         update.attempts += 1
         update.last_error = str(exc)
+        update.next_retry_at = datetime.now(UTC) + timedelta(
+            seconds=min(3600, 60 * 2 ** min(update.attempts - 1, 6))
+        )
         await session.flush()
         logger.info(
             "Pending server update #%s still failed for server #%s: %s",
@@ -114,6 +131,7 @@ async def apply_pending_update(
     update.status = "applied"
     update.attempts += 1
     update.last_error = None
+    update.next_retry_at = None
     await _clear_payment_error_if_complete(session, update)
     await audit.record(
         session,
@@ -156,6 +174,19 @@ async def _apply_to_server(
     expiry: datetime,
     updater: PanelUpdater,
 ) -> None:
+    if any(inbound.enabled for inbound in server.inbounds):
+        user = await session.get(User, client.user_id)
+        public_id = (user.public_id if user else None) or client.email or str(client.user_id)
+        result = await provisioning.apply_access_to_server(
+            session, client, public_id, server, expiry, updater
+        )
+        if not result.ok:
+            raise PanelUpdateError(result.error or "panel update failed")
+        return
+
+    if server.inbounds:
+        raise PanelUpdateError("no_enabled_inbounds")
+
     mappings = await MappingRepository(session).list_for_client(client.id)
     server_mappings = [
         mapping

@@ -60,15 +60,15 @@ async def process_expiry_notifications(
             client.expiry_notify_stage = target
             changed = True
             continue
-        # Отправляем все непройденные стадии по порядку (обычно одну).
-        for stage in range(client.expiry_notify_stage + 1, target + 1):
-            ok = await notify.notify_user_expiry(
-                bot, user.telegram_id, stage, client.expires_at
-            )
-            if ok:
-                sent += 1
-        client.expiry_notify_stage = target
-        changed = True
+        # After downtime send only the current state, not stale day/hour warnings.
+        # A transient Telegram failure must leave the notification retryable.
+        ok = await notify.notify_user_expiry(
+            bot, user.telegram_id, target, client.expires_at
+        )
+        if ok:
+            sent += 1
+            client.expiry_notify_stage = target
+            changed = True
 
     if changed:
         await session.commit()

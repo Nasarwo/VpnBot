@@ -100,9 +100,12 @@ async def approve_request(
         raise BindRequestError("Пользователь заявки не найден")
 
     try:
-        await provisioning.bind_user_by_public_id(
-            session, user, req.public_id, updater
-        )
+        # A failed panel sync must not commit half a local account reassignment
+        # together with the FAILED request status.
+        async with session.begin_nested():
+            await provisioning.bind_user_by_public_id(
+                session, user, req.public_id, updater
+            )
     except PanelUpdateError as exc:
         req.status = BindRequestStatus.FAILED
         req.last_error = str(exc)

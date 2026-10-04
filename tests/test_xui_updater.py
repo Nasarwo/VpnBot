@@ -31,6 +31,7 @@ def _spec() -> ServerProvision:
         sub_id="PUB123",
         client_uuid="uuid-1",
         password="pass-1",
+        telegram_id=1891806016,
         inbounds=[
             ProvisionInbound(10, Protocol.VLESS, flow="xtls-rprx-vision"),
             ProvisionInbound(11, Protocol.TROJAN),
@@ -39,6 +40,13 @@ def _spec() -> ServerProvision:
 
 
 def _mock_auth(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        method="GET", url=f"{BASE}/panel/api/inbounds/list",
+        json={"success": True, "obj": [
+            {"id": 10, "protocol": "vless", "enable": True},
+            {"id": 11, "protocol": "trojan", "enable": True},
+        ]},
+    )
     httpx_mock.add_response(
         method="GET",
         url=f"{BASE}/csrf-token",
@@ -77,6 +85,7 @@ async def test_provision_server_new_api_creates(httpx_mock: HTTPXMock):
     assert set(body["inboundIds"]) == {10, 11}
     assert body["client"]["email"] == "PUB123"
     assert body["client"]["subId"] == "PUB123"
+    assert body["client"]["tgId"] == 1891806016
     assert body["client"]["expiryTime"] == 1_700_000_000_000
     assert body["client"]["flow"] == "xtls-rprx-vision"
 
@@ -128,6 +137,7 @@ async def test_provision_server_new_api_updates_existing(httpx_mock: HTTPXMock):
     assert body["subId"] == "PUB123"
     assert body["expiryTime"] == 1_800_000_000_000
     assert body["enable"] is True
+    assert body["tgId"] == 1891806016
     assert "createdAt" not in body
 
 
@@ -184,6 +194,16 @@ async def test_provision_server_finds_client_by_sub_id(httpx_mock: HTTPXMock):
         json={"success": True},
     )
 
+    httpx_mock.add_response(
+        method="POST", url=f"{BASE}/panel/api/clients/asya/attach",
+        json={"success": True},
+    )
+    httpx_mock.add_response(
+        method="GET", url=f"{BASE}/panel/api/clients/get/asya",
+        json={"success": True, "obj": {
+            "client": {"email": "asya", "id": "uuid-asya"}, "inboundIds": [10, 11],
+        }},
+    )
     spec = ServerProvision(
         email="asya2",
         sub_id="PUB123",
@@ -218,3 +238,4 @@ async def test_legacy_provisioning_keeps_one_email_for_every_inbound():
 
     assert len(client.added) == 2
     assert {body["email"] for _, body in client.added} == {"PUB123"}
+    assert {body["tgId"] for _, body in client.added} == {"1891806016"}

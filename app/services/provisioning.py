@@ -101,13 +101,15 @@ async def ensure_vpn_client(session: AsyncSession, user: User) -> VpnClient:
 
 
 def _build_spec(
-    email: str, sub_id: str, secret: str, inbounds: list[ServerInbound]
+    email: str, sub_id: str, secret: str, inbounds: list[ServerInbound],
+    telegram_id: int | None = None,
 ) -> ServerProvision:
     return ServerProvision(
         email=email,
         sub_id=sub_id,
         client_uuid=secret,
         password=secret,
+        telegram_id=telegram_id,
         inbounds=[
             ProvisionInbound(
                 inbound_id=i.inbound_id,
@@ -161,7 +163,11 @@ async def apply_access_to_server(
             server_id=server.id, ok=False, error="no_enabled_inbounds"
         )
 
-    spec = _build_spec(email, sub_id, secret, enabled_inbounds)
+    user = await session.get(User, vpn_client.user_id)
+    spec = _build_spec(
+        email, sub_id, secret, enabled_inbounds,
+        telegram_id=user.telegram_id if user else None,
+    )
     try:
         await updater.provision_server(server, spec, expiry_ms)
     except PanelUpdateError as exc:
@@ -236,9 +242,17 @@ async def apply_access(
 
     results: list[ServerUpdateResult] = []
     covered_any = False
+    user = await session.get(User, vpn_client.user_id)
 
     for server in servers:
         enabled_inbounds = [i for i in server.inbounds if i.enabled]
+        if not server.inbounds:
+            # Legacy bindings can precede the local inbound inventory. Reconcile
+            # their known targets, but never bypass explicitly disabled targets.
+            enabled_inbounds = [
+                ServerInbound(inbound_id=m.inbound_id, protocol=m.protocol, enabled=True)
+                for m in existing_mappings if m.server_id == server.id and m.enabled
+            ]
         if not enabled_inbounds:
             logger.warning(
                 "apply_access: у сервера #%s (%s) нет включённых inbound'ов "
@@ -247,9 +261,15 @@ async def apply_access(
                 server.name,
                 server.id,
             )
+            results.append(ServerUpdateResult(
+                server_id=server.id, ok=False, error="no_enabled_inbounds",
+            ))
             continue
         covered_any = True
-        spec = _build_spec(email, sub_id, secret, enabled_inbounds)
+        spec = _build_spec(
+            email, sub_id, secret, enabled_inbounds,
+            telegram_id=user.telegram_id if user else None,
+        )
         try:
             await updater.provision_server(server, spec, expiry_ms)
         except PanelUpdateError as exc:
@@ -310,9 +330,10 @@ def _ss_method(settings_raw: object) -> str | None:
 async def import_inbounds(
     session: AsyncSession, server: Server, timeout: float = 15.0
 ) -> list[tuple[int, str, str]]:
-    """Читает inbound'ы панели сервера и заводит недостающие ServerInbound.
+    """Сверяет inbound'ы панели с локальными целями провижининга.
 
-    Возвращает список (inbound_id, protocol, action), где action: added/skipped/exists.
+    Удалённые и выключенные на панели цели отключаются. Ручное отключение
+    существующей цели сохраняется. Возвращает added/skipped/exists/disabled.
     """
     async with XuiClient(
         base_url=server.panel_url,
@@ -325,19 +346,25 @@ async def import_inbounds(
         except XuiError as exc:
             raise PanelUpdateError(str(exc)) from exc
 
-    existing_ids = set(
+    existing = {
+        item.inbound_id: item for item in
         (
             await session.execute(
-                select(ServerInbound.inbound_id).where(
+                select(ServerInbound).where(
                     ServerInbound.server_id == server.id
                 )
             )
         )
         .scalars()
         .all()
-    )
+    }
 
     summary: list[tuple[int, str, str]] = []
+    live_ids = {i.get("id") for i in inbounds if isinstance(i.get("id"), int)}
+    for existing_id, configured in existing.items():
+        if existing_id not in live_ids and configured.enabled:
+            configured.enabled = False
+            summary.append((existing_id, configured.protocol.value, "disabled"))
     for inb in inbounds:
         proto_raw = str(inb.get("protocol", "")).lower()
         inbound_id = inb.get("id")
@@ -345,16 +372,25 @@ async def import_inbounds(
             continue
         protocol = _PROTOCOL_MAP.get(proto_raw)
         if protocol is None:
+            if inbound_id in existing:
+                existing[inbound_id].enabled = False
             summary.append((inbound_id, proto_raw or "?", "skipped"))
-            continue
-        if inbound_id in existing_ids:
-            summary.append((inbound_id, protocol.value, "exists"))
             continue
         method = (
             _ss_method(inb.get("settings"))
             if protocol == Protocol.SHADOWSOCKS
             else None
         )
+        if inbound_id in existing:
+            configured = existing[inbound_id]
+            configured.protocol = protocol
+            configured.method = method
+            configured.remark = str(inb.get("remark") or "") or None
+            disabled = configured.enabled and inb.get("enable") is False
+            if disabled:
+                configured.enabled = False
+            summary.append((inbound_id, protocol.value, "disabled" if disabled else "exists"))
+            continue
         session.add(
             ServerInbound(
                 server_id=server.id,
@@ -363,7 +399,7 @@ async def import_inbounds(
                 flow=None,
                 method=method,
                 remark=str(inb.get("remark") or "") or None,
-                enabled=True,
+                enabled=inb.get("enable") is not False,
             )
         )
         summary.append((inbound_id, protocol.value, "added"))

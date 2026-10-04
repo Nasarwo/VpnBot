@@ -23,6 +23,7 @@ dev = [
     "pytest-httpx>=0.30",
     "ruff>=0.5",
     "mypy==1.11.2",
+    "graphifyy>=0.9.63,<0.10",
 ]
 
 [build-system]

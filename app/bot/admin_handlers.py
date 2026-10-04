@@ -839,13 +839,18 @@ async def on_payment_action(
                     payment.user.telegram_id,
                     client,
                     first_purchase=result.first_purchase,
+                    pending_servers=len(result.failed_servers),
                 )
             await callback.message.edit_text(
-                f"Готово. Доступ продлён.\n\n"
+                ("Оплата учтена. Ожидается синхронизация серверов.\n\n"
+                 if result.failed_servers else "Готово. Доступ продлён.\n\n")
+                +
                 f"{texts.admin_payment_card(payment, payment.user)}",
                 parse_mode="HTML",
             )
-            await ui.answer_callback(callback, "Доступ продлён")
+            await ui.answer_callback(
+                callback, "Оплата учтена" if result.failed_servers else "Доступ продлён"
+            )
             return
 
         if payment is not None:
@@ -895,7 +900,7 @@ async def confirm_cmd(
 
     updater = _get_updater(settings)
     try:
-        if payment.status == PaymentStatus.FAILED:
+        if payment.status in (PaymentStatus.FAILED, PaymentStatus.CONFIRMED):
             result = await billing.retry_payment(
                 session, payment.id, actor_user_id=db_user.id, updater=updater
             )
@@ -927,9 +932,12 @@ async def confirm_cmd(
                 full.user.telegram_id,
                 client,
                 first_purchase=result.first_purchase,
+                pending_servers=len(result.failed_servers),
             )
         await message.answer(
-            f"Готово. Заявка {code_html} подтверждена, доступ продлён.",
+            f"Заявка {code_html} подтверждена. "
+            + ("Ожидается синхронизация серверов."
+               if result.failed_servers else "Доступ продлён."),
             parse_mode="HTML",
         )
         return
@@ -1452,8 +1460,12 @@ async def provision_user(
         await message.answer("Пользователь не найден")
         return
 
-    client = await provisioning.ensure_vpn_client(session, target)
-    expiry = client.expires_at or datetime.now(tz=UTC)
+    client = await VpnClientRepository(session).get_for_user(target.id)
+    if client is None or (client.expires_at is None and not client.mappings):
+        await message.answer("У пользователя нет подписки для синхронизации.")
+        return
+    # None is an existing unlimited subscription, not an expiry at this instant.
+    expiry = client.expires_at
     results = await provisioning.apply_access(
         session,
         client,

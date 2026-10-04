@@ -111,7 +111,7 @@ def test_merge_client_record_preserves_secrets():
     assert merged["expiryTime"] == 1_900_000_000_000
     assert merged["enable"] is True
     assert "createdAt" not in merged
-    assert "comment" not in merged
+    assert merged["comment"] == existing["comment"]
 
 
 def test_sanitize_client_for_api():

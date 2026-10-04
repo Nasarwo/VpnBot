@@ -201,9 +201,12 @@ class XuiClient:
     @staticmethod
     def _parse_json(response: httpx.Response) -> dict[str, Any]:
         try:
-            return response.json()
+            data = response.json()
         except json.JSONDecodeError as exc:
             raise XuiError("Некорректный JSON-ответ панели") from exc
+        if not isinstance(data, dict):
+            raise XuiError("Некорректная структура JSON-ответа панели")
+        return data
 
     # --- Авторизация --------------------------------------------------------
 
@@ -283,8 +286,12 @@ class XuiClient:
         data = self._parse_json(response)
         if not data.get("success", False):
             raise XuiError(f"Не удалось получить список inbound: {data.get('msg')}")
-        obj = data.get("obj", [])
-        return obj if isinstance(obj, list) else []
+        obj = data.get("obj")
+        if not isinstance(obj, list) or any(
+            not isinstance(item, dict) or type(item.get("id")) is not int for item in obj
+        ):
+            raise XuiError("Некорректный список inbound панели")
+        return obj
 
     async def get_inbound(self, inbound_id: int) -> dict[str, Any]:
         response = await self._api("GET", f"/panel/api/inbounds/get/{inbound_id}")
@@ -482,10 +489,14 @@ class XuiClient:
         email: str,
         expiry_ms: int,
         identifier: str | None = None,  # noqa: ARG002 - совместимость сигнатуры
+        tg_id: int | None = None,
     ) -> None:
         """Совместимый метод: продление через read-modify-write."""
-        await self.set_client_expiry(
-            inbound_id, expiry_ms, client_uuid=client_uuid, email=email
+        changes: dict[str, Any] = {"expiryTime": expiry_ms, "enable": True}
+        if tg_id is not None:
+            changes["tgId"] = str(tg_id)
+        await self.update_client(
+            inbound_id, changes, client_uuid=client_uuid, email=email
         )
 
     # --- Создание / удаление клиента ---------------------------------------
@@ -557,7 +568,13 @@ class XuiClient:
         )
         # Существующий маршрут вернёт 200 (даже если клиент не найден),
         # на старых панелях маршрута нет — gin отдаёт 404.
-        self._clients_api = response.status_code == 200
+        if response.status_code == 404:
+            self._clients_api = False
+        elif response.status_code == 200:
+            self._parse_json(response)
+            self._clients_api = True
+        else:
+            raise XuiError(f"Не удалось определить API панели: HTTP {response.status_code}")
         logger.info(
             "Панель %s: client-API %s",
             self._base_url,
@@ -598,14 +615,18 @@ class XuiClient:
         response = await self._api(
             "GET", f"/panel/api/clients/get/{encoded}"
         )
-        try:
-            data = response.json()
-        except json.JSONDecodeError:
-            return None
+        if response.status_code != 200:
+            raise XuiError(f"Не удалось прочитать клиента панели: HTTP {response.status_code}")
+        data = self._parse_json(response)
         if not data.get("success", False):
-            return None
+            message = str(data.get("msg") or "")
+            if any(marker in message.casefold() for marker in ("not found", "не найден")):
+                return None
+            raise XuiError(f"Не удалось прочитать клиента панели: {message}")
         obj = data.get("obj")
-        return obj if isinstance(obj, dict) else None
+        if obj is not None and not isinstance(obj, dict):
+            raise XuiError("Некорректная запись клиента панели")
+        return obj
 
     async def find_client_record_by_sub_id(
         self, sub_id: str
@@ -613,10 +634,7 @@ class XuiClient:
         """Ищет клиента по subId (email в панели может отличаться от public_id)."""
         if not sub_id:
             return None
-        try:
-            records = await self.list_client_records()
-        except XuiError:
-            return None
+        records = await self.list_client_records()
         for item in records:
             nested = item.get("client") if isinstance(item, dict) else None
             body = nested if isinstance(nested, dict) else item
@@ -694,6 +712,16 @@ class XuiClient:
                 f"{data.get('msg')}"
             )
         logger.info("clients/update ок: email=%s", email)
+
+    async def attach_client_record(self, email: str, inbound_ids: list[int]) -> None:
+        """Attach an existing global client; update does not add memberships."""
+        if not inbound_ids:
+            return
+        path = f"/panel/api/clients/{_quote_path_segment(email)}/attach"
+        response = await self._api("POST", path, json={"inboundIds": inbound_ids})
+        data = self._parse_json(response)
+        if not data.get("success", False):
+            raise XuiError(f"Панель не подтвердила привязку клиента {email}: {data.get('msg')}")
 
     # --- Трафик / IP --------------------------------------------------------
 

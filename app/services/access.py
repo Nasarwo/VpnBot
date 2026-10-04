@@ -21,7 +21,9 @@ def has_unlimited_bound_client(client: VpnClient | None) -> bool:
 
 
 def has_client_access(client: VpnClient | None) -> bool:
-    return has_active_timed_client(client) or has_unlimited_bound_client(client)
+    return bool(client and client.is_active) and (
+        has_active_timed_client(client) or has_unlimited_bound_client(client)
+    )
 
 
 def resolve_effective_role(
@@ -29,6 +31,6 @@ def resolve_effective_role(
     telegram_id: int,
     client: VpnClient | None,
 ) -> UserRole:
-    if settings.is_admin(telegram_id) or has_unlimited_bound_client(client):
+    if settings.is_admin(telegram_id):
         return UserRole.ADMIN
     return UserRole.USER

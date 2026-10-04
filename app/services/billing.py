@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.enums import PaymentStatus
@@ -12,9 +12,11 @@ from app.db.models import PaymentRequest, User, VpnClient
 from app.db.repositories import (
     MappingRepository,
     PaymentRepository,
+    ServerRepository,
     VpnClientRepository,
 )
 from app.services import audit, pending_updates, provisioning
+from app.services.operation_lock import serialized_access
 from app.services.panel_updater import PanelUpdateError, PanelUpdater, ServerUpdateResult
 
 logger = logging.getLogger(__name__)
@@ -122,6 +124,11 @@ async def _apply_panels(
     new_expiry: datetime,
     updater: PanelUpdater,
 ) -> list[ServerUpdateResult]:
+    if await provisioning.has_targets(session):
+        user = await session.get(User, client.user_id)
+        public_id = (user.public_id if user else None) or client.email or str(client.user_id)
+        return await provisioning.apply_access(session, client, public_id, new_expiry, updater)
+
     mapping_repo = MappingRepository(session)
     mappings = await mapping_repo.list_for_client(client.id)
     expiry_ms = expiry_to_ms(new_expiry)
@@ -130,6 +137,12 @@ async def _apply_panels(
     for mapping in mappings:
         server = mapping.server
         if server is None or not server.enabled or not mapping.enabled:
+            continue
+        configured = await ServerRepository(session).get_with_inbounds(server.id)
+        if configured is not None and configured.inbounds:
+            results.append(ServerUpdateResult(
+                server_id=server.id, ok=False, error="no_enabled_inbounds",
+            ))
             continue
         try:
             await updater.update_expiry(server, mapping, expiry_ms)
@@ -197,7 +210,21 @@ async def _extend_and_finalize(
         assert user is not None
         client = await provisioning.ensure_vpn_client(session, user)
 
-    new_expiry = resolve_target_expiry(payment, client, now)
+    if payment.target_expires_at is None:
+        reserved = await session.scalar(
+            select(func.max(PaymentRequest.target_expires_at)).where(
+                PaymentRequest.user_id == payment.user_id,
+                PaymentRequest.status == PaymentStatus.CONFIRMED,
+            )
+        )
+        base = max(
+            [value for value in (_as_aware(client.expires_at), _as_aware(reserved), now)
+             if value is not None]
+        )
+        new_expiry = compute_new_expiry(base, now, payment.period_days)
+    else:
+        new_expiry = max(resolve_target_expiry(payment, client, now),
+                         _as_aware(client.expires_at) or now)
     eligible_mappings = await _count_eligible_mappings(session, client.id)
 
     await _persist_target_before_panels(session, payment, new_expiry, now)
@@ -299,6 +326,7 @@ async def _extend_and_finalize(
     )
 
 
+@serialized_access("payment_id", "payment")
 async def confirm_payment(
     session: AsyncSession,
     payment_id: int,
@@ -335,6 +363,7 @@ async def confirm_payment(
     return await _extend_and_finalize(session, payment, actor_user_id, updater, now)
 
 
+@serialized_access("payment_id", "payment")
 async def retry_payment(
     session: AsyncSession,
     payment_id: int,
@@ -342,7 +371,7 @@ async def retry_payment(
     updater: PanelUpdater,
     now: datetime | None = None,
 ) -> BillingResult:
-    """Повторное применение заявки, ранее завершившейся ошибкой (failed)."""
+    """Повторяет сбойную или прерванную после фиксации target заявку."""
     now = now or _utcnow()
     repo = PaymentRepository(session)
     payment = await repo.get_by_id_for_update(payment_id)
@@ -352,14 +381,20 @@ async def retry_payment(
     if payment.status == PaymentStatus.APPLIED:
         return BillingResult(payment=payment, applied=False, already_applied=True)
 
-    if payment.status != PaymentStatus.FAILED:
+    resumable = (
+        payment.status == PaymentStatus.CONFIRMED
+        and payment.target_expires_at is not None
+    )
+    if payment.status != PaymentStatus.FAILED and not resumable:
         raise BillingError(
-            f"Повторить можно только заявку в статусе failed, текущий: {payment.status.value}"
+            "Повторить можно заявку с ошибкой или прерванное подтверждение, "
+            f"текущий статус: {payment.status.value}"
         )
 
     return await _extend_and_finalize(session, payment, actor_user_id, updater, now)
 
 
+@serialized_access("vpn_client_id", "client")
 async def manual_extend(
     session: AsyncSession,
     vpn_client_id: int,
@@ -405,6 +440,7 @@ async def manual_extend(
     return BillingResult(payment=None, applied=True, new_expires_at=new_expiry)
 
 
+@serialized_access("vpn_client_id", "client")
 async def sync_client(
     session: AsyncSession,
     vpn_client_id: int,
@@ -432,6 +468,7 @@ async def sync_client(
     return results
 
 
+@serialized_access("user_id", "user")
 async def grant_trial(
     session: AsyncSession,
     user_id: int,
@@ -540,3 +577,23 @@ async def reject_payment(
     )
     await session.commit()
     return payment
+
+
+async def recover_confirmed_payments(session: AsyncSession, updater: PanelUpdater) -> int:
+    """Resume durable payment intents after a process interruption."""
+    identifiers = (await session.scalars(
+        select(PaymentRequest.id).where(
+            PaymentRequest.status == PaymentStatus.CONFIRMED,
+            PaymentRequest.target_expires_at.is_not(None),
+            PaymentRequest.confirmed_at < _utcnow() - timedelta(minutes=5),
+        ).order_by(PaymentRequest.id).limit(10)
+    )).all()
+    recovered = 0
+    for identifier in identifiers:
+        try:
+            result = await retry_payment(session, identifier, None, updater)
+            recovered += int(result.applied)
+        except Exception:  # noqa: BLE001
+            await session.rollback()
+            logger.exception("Failed to recover confirmed payment #%s", identifier)
+    return recovered

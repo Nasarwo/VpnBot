@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import ClientServerMapping, IpObservation, User, VpnClient
 from app.db.repositories import MappingRepository, VpnClientRepository
 from app.services import audit
+from app.services.operation_lock import serialized_access
 from app.services.panel_updater import PanelUpdateError, PanelUpdater, ServerUpdateResult
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class SubscriptionDeleteResult:
     failed_servers: list[ServerUpdateResult] = field(default_factory=list)
 
 
+@serialized_access("user", "user_object")
 async def delete_user_subscription(
     session: AsyncSession,
     user: User,

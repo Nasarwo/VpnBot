@@ -440,8 +440,9 @@ async def start_bridge(bot: Bot, settings: Settings) -> web.AppRunner | None:
                         "и до первой подписки",
                         409,
                     )
-                # Serialize against trial activation in the bot as well.
-                await session.execute(select(User).where(User.id == user.id).with_for_update())
+                # Release account/user row locks before acquiring the shared access lock.
+                # grant_trial rechecks trial eligibility under its own user row lock.
+                await session.commit()
                 result = await billing.grant_trial(
                     session,
                     user.id,
