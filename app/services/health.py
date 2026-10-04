@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Server
+from app.db.models import SERVER_PURPOSE_STANDARD, Server
 from app.db.repositories import ServerRepository
 from app.services import pending_updates
 from app.services.panel_updater import PanelUpdater
@@ -52,7 +52,12 @@ async def check_servers(
         online = await check_server(server, timeout=timeout)
         await repo.set_status(server.id, online)
         result[server.id] = online
-        if online and server.enabled and updater is not None:
+        if (
+            online
+            and server.enabled
+            and server.purpose == SERVER_PURPOSE_STANDARD
+            and updater is not None
+        ):
             try:
                 pending_results = await pending_updates.apply_pending_for_server(
                     session, server.id, updater

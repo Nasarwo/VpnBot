@@ -31,6 +31,7 @@ from app.bot.filters import IsAdmin
 from app.config import Settings
 from app.db.enums import AttachmentType, PaymentStatus, UserRole
 from app.db.models import (
+    SERVER_PURPOSE_STANDARD,
     PaymentAttachment,
     PaymentRequest,
     Server,
@@ -265,7 +266,12 @@ async def start_bridge(bot: Bot, settings: Settings) -> web.AppRunner | None:
                     )
                 ).all()
                 servers = (
-                    await session.scalars(select(Server).where(Server.enabled.is_(True)))
+                    await session.scalars(
+                        select(Server).where(
+                            Server.enabled.is_(True),
+                            Server.purpose == SERVER_PURPOSE_STANDARD,
+                        )
+                    )
                 ).all()
                 result = {
                     "email": account.email,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from html import escape
 from urllib.parse import urlparse
 
@@ -9,16 +10,33 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.bot import keyboards, notify, texts, ui
-from app.bot.callbacks import AdminCallback, BindCallback, PaymentCallback
+from app.bot.callbacks import (
+    AdminCallback,
+    BindCallback,
+    PaymentCallback,
+    WhitelistAdminCallback,
+)
 from app.bot.filters import IsAdmin
 from app.bot.states import AdminStates
 from app.config import Settings
 from app.db.enums import BindRequestStatus, PaymentStatus, Protocol
-from app.db.models import Server, ServerInbound, User
+from app.db.models import (
+    PAYMENT_KIND_TRAFFIC,
+    SERVER_PURPOSE_STANDARD,
+    SERVER_PURPOSE_WHITELIST,
+    PaymentRequest,
+    Server,
+    ServerInbound,
+    TrafficPackage,
+    User,
+)
 from app.db.repositories import (
     BindRequestRepository,
     PaymentRepository,
@@ -28,11 +46,13 @@ from app.db.repositories import (
 )
 from app.services import (
     antishare,
+    audit,
     billing,
     bind_requests,
     broadcast,
     provisioning,
     subscription_delete,
+    whitelist,
 )
 from app.services.ip_provider import build_ip_provider
 from app.services.panel_updater import PanelUpdateError, PanelUpdater
@@ -51,8 +71,10 @@ def _get_updater(settings: Settings) -> PanelUpdater:
     return build_updater(timeout=float(settings.xui_request_timeout))
 
 
-def _parse_server_line(raw: str) -> tuple[Server | None, str | None]:
-    """Парсит строку 'name|country|panel_url|username|password|[kind]|[sub]'.
+def _parse_server_line(
+    raw: str, purpose: str = SERVER_PURPOSE_STANDARD
+) -> tuple[Server | None, str | None]:
+    """Парсит 'name|country|panel_url|username|password|[kind]|[sub]|[purpose]'.
 
     Возвращает (server, None) при успехе или (None, текст ошибки).
     """
@@ -67,6 +89,10 @@ def _parse_server_line(raw: str) -> tuple[Server | None, str | None]:
         return None, "Обязательны поля: name, panel_url, username, password."
     kind = parts[5] if len(parts) > 5 and parts[5] else "direct"
     sub_base = parts[6] if len(parts) > 6 and parts[6] else None
+    if len(parts) > 7 and parts[7]:
+        purpose = parts[7].lower()
+    if purpose not in (SERVER_PURPOSE_STANDARD, SERVER_PURPOSE_WHITELIST):
+        return None, "Назначение сервера: standard или whitelist."
     server = Server(
         name=name,
         country=country or None,
@@ -75,6 +101,7 @@ def _parse_server_line(raw: str) -> tuple[Server | None, str | None]:
         password=password,
         kind=kind,
         subscription_base=sub_base,
+        purpose=purpose,
         enabled=True,
     )
     return server, None
@@ -110,13 +137,18 @@ def _validate_subscription_base(
 
 
 async def _finalize_new_server(
-    session: AsyncSession, server: Server, settings: Settings
+    session: AsyncSession,
+    server: Server,
+    settings: Settings,
+    actor_user_id: int | None = None,
 ) -> str:
     """Сохраняет сервер и сразу пытается импортировать его inbound'ы.
 
     Так добавленный сервер становится готовой целью провижининга без отдельного
     ручного шага импорта.
     """
+    if server.purpose == SERVER_PURPOSE_WHITELIST:
+        return await _finalize_whitelist_server(session, server, settings, actor_user_id)
     await ServerRepository(session).add(server)
     await session.commit()
     text = f"Сервер добавлен: #{server.id} {server.name}"
@@ -132,6 +164,47 @@ async def _finalize_new_server(
             "Запустите импорт вручную в /admin → сервер → «Импорт inbound'ов»."
         )
     return text
+
+
+async def _finalize_whitelist_server(
+    session: AsyncSession,
+    server: Server,
+    settings: Settings,
+    actor_user_id: int | None,
+) -> str:
+    """Добавляет сервер услуги и сразу сверяет его inbound'ы.
+
+    До успешной сверки с единственным целевым inbound сервер не выдаёт конфиги.
+    """
+    if await whitelist.has_other_enabled_whitelist(session):
+        return (
+            "Уже есть включённый сервер «Обход белых списков». Выключите его, "
+            "прежде чем добавлять другой: независимые панели не делят одну квоту."
+        )
+    try:
+        await ServerRepository(session).add(server)
+        await audit.record(
+            session,
+            action="whitelist.server_added",
+            actor_user_id=actor_user_id,
+            entity_type="server",
+            entity_id=server.id,
+            payload={"name": server.name},
+        )
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        return "Уже есть включённый сервер «Обход белых списков»."
+    result = await whitelist.sync_inventory(
+        session, server, timeout=float(settings.xui_request_timeout),
+        actor_user_id=actor_user_id,
+    )
+    await session.commit()
+    return (
+        f"Сервер «Обход белых списков» добавлен: #{server.id} {server.name}\n\n"
+        + texts.admin_whitelist_inventory(result)
+        + "\n\nПроверьте раздел /admin → «Обход белых списков»."
+    )
 
 
 async def _edit_panel(
@@ -224,7 +297,35 @@ async def admin_nav(
         if server is None:
             await ui.answer_callback(callback, "Сервер не найден", show_alert=True)
             return
+        if (
+            not server.enabled
+            and server.purpose == SERVER_PURPOSE_WHITELIST
+            and await whitelist.has_other_enabled_whitelist(session, server.id)
+        ):
+            await ui.answer_callback(
+                callback,
+                "Уже включён другой сервер «Обход белых списков»",
+                show_alert=True,
+            )
+            return
         server.enabled = not server.enabled
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            await ui.answer_callback(
+                callback, "Уже включён другой сервер «Обход белых списков»",
+                show_alert=True,
+            )
+            return
+        await audit.record(
+            session,
+            action="server.toggled",
+            actor_user_id=db_user.id,
+            entity_type="server",
+            entity_id=sid,
+            payload={"enabled": server.enabled},
+        )
         await session.commit()
         server = await repo.get_with_inbounds(sid)
         await _edit_panel(
@@ -270,6 +371,25 @@ async def admin_nav(
         server = await repo.get_by_id(sid)
         if server is None:
             await ui.answer_callback(callback, "Сервер не найден", show_alert=True)
+            return
+        if server.purpose == SERVER_PURPOSE_WHITELIST:
+            result = await whitelist.sync_inventory(
+                session, server, timeout=float(settings.xui_request_timeout),
+                actor_user_id=db_user.id,
+            )
+            await session.commit()
+            server = await repo.get_with_inbounds(sid)
+            if server is None:
+                await ui.answer_callback(callback, "Сервер не найден", show_alert=True)
+                return
+            await _edit_panel(
+                callback,
+                texts.admin_whitelist_inventory(result)
+                + "\n\n"
+                + texts.admin_server_detail(server),
+                keyboards.admin_server_keyboard(server),
+                alert="Синхронизация выполнена",
+            )
             return
         try:
             summary = await provisioning.import_inbounds(
@@ -343,9 +463,42 @@ async def admin_nav(
         return
 
     if action == "add":
-        await state.set_state(AdminStates.waiting_server_line)
+        await state.clear()
         await _edit_panel(
-            callback, texts.admin_add_server_prompt(),
+            callback,
+            "Добавление сервера. Выберите назначение:\n\n"
+            "Обычный VPN — безлимитные конфиги подписки.\n"
+            "Обход белых списков — отдельный конфиг с учётом трафика "
+            "(допускается один включённый сервер).",
+            keyboards.admin_add_server_type_keyboard(),
+        )
+        return
+
+    if action in ("add_standard", "add_whitelist"):
+        purpose = (
+            SERVER_PURPOSE_WHITELIST if action == "add_whitelist" else SERVER_PURPOSE_STANDARD
+        )
+        if purpose == SERVER_PURPOSE_WHITELIST and await whitelist.has_other_enabled_whitelist(
+            session
+        ):
+            await ui.answer_callback(
+                callback,
+                "Уже есть включённый сервер «Обход белых списков»",
+                show_alert=True,
+            )
+            return
+        await state.set_state(AdminStates.waiting_server_line)
+        await state.update_data(server_purpose=purpose)
+        prompt = texts.admin_add_server_prompt()
+        if purpose == SERVER_PURPOSE_WHITELIST:
+            prompt = (
+                "Сервер услуги «Обход белых списков».\n"
+                "После добавления бот прочитает inbound'ы панели; нужен ровно один "
+                "целевой inbound. Название сервера в SubHub задаёт подпись конфига.\n\n"
+                + prompt
+            )
+        await _edit_panel(
+            callback, prompt,
             keyboards.admin_back_keyboard("servers"),
         )
         return
@@ -434,12 +587,18 @@ async def admin_add_server_line(
     session: AsyncSession,
     state: FSMContext,
     settings: Settings,
+    db_user: User,
 ) -> None:
-    server, error = _parse_server_line(message.text or "")
+    data = await state.get_data()
+    purpose = data.get("server_purpose") or SERVER_PURPOSE_STANDARD
+    server, error = _parse_server_line(message.text or "", purpose)
     if error is not None:
         await message.answer(error + "\n\nИли отправьте /cancel.")
         return
-    text = await _finalize_new_server(session, server, settings)
+    text = await _finalize_new_server(
+        session, server, settings,
+        actor_user_id=db_user.id,
+    )
     await state.clear()
     logger.info(
         "Админ tg=%s добавил сервер #%s через панель",
@@ -751,6 +910,56 @@ async def on_bind_action(
     await ui.answer_callback(callback, "Неизвестное действие", show_alert=True)
 
 
+async def _after_applied_payment(
+    bot,
+    session: AsyncSession,
+    settings: Settings,
+    payment: PaymentRequest,
+    result: billing.BillingResult,
+) -> str:
+    """Уведомления и SubHub после применения; возвращает итог для администратора.
+
+    Сообщения различают сохранённую оплату и ожидающее применение на серверах.
+    """
+    await trigger_configured_sync(
+        settings.subhub_url,
+        settings.subhub_admin_token,
+        timeout=settings.subhub_timeout_seconds,
+    )
+    client = await VpnClientRepository(session).get_for_user(payment.user_id)
+    if payment.kind == PAYMENT_KIND_TRAFFIC:
+        state = whitelist.access_state(client, datetime.now(tz=UTC))
+        await notify.notify_user_traffic_credited(
+            bot,
+            payment.user.telegram_id,
+            result.traffic_bytes,
+            active=state.active,
+            pending=result.whitelist_pending,
+        )
+        headline = f"Начислено {texts.fmt_gb(result.traffic_bytes)} трафика."
+        if not state.active:
+            headline += " Подписка не активна: конфиг остаётся выключенным."
+        elif result.whitelist_pending:
+            headline += " Применение на сервере ожидается (очередь повторит)."
+        return headline
+    if client is not None:
+        await notify.notify_user_extended(
+            bot,
+            payment.user.telegram_id,
+            client,
+            first_purchase=result.first_purchase,
+            pending_servers=len(result.failed_servers),
+            whitelist_pending=result.whitelist_pending,
+        )
+    headline = (
+        "Оплата учтена. Ожидается синхронизация серверов."
+        if result.failed_servers else "Доступ продлён."
+    )
+    if result.whitelist_pending:
+        headline += " «Обход белых списков»: применение ожидается."
+    return headline
+
+
 @router.callback_query(PaymentCallback.filter())
 async def on_payment_action(
     callback: CallbackQuery,
@@ -827,30 +1036,14 @@ async def on_payment_action(
             return
 
         if result.applied and payment is not None:
-            await trigger_configured_sync(
-                settings.subhub_url,
-                settings.subhub_admin_token,
-                timeout=settings.subhub_timeout_seconds,
+            headline = await _after_applied_payment(
+                callback.bot, session, settings, payment, result
             )
-            client = await VpnClientRepository(session).get_for_user(payment.user_id)
-            if client is not None:
-                await notify.notify_user_extended(
-                    callback.bot,
-                    payment.user.telegram_id,
-                    client,
-                    first_purchase=result.first_purchase,
-                    pending_servers=len(result.failed_servers),
-                )
             await callback.message.edit_text(
-                ("Оплата учтена. Ожидается синхронизация серверов.\n\n"
-                 if result.failed_servers else "Готово. Доступ продлён.\n\n")
-                +
-                f"{texts.admin_payment_card(payment, payment.user)}",
+                f"{headline}\n\n{texts.admin_payment_card(payment, payment.user)}",
                 parse_mode="HTML",
             )
-            await ui.answer_callback(
-                callback, "Оплата учтена" if result.failed_servers else "Доступ продлён"
-            )
+            await ui.answer_callback(callback, headline[:200])
             return
 
         if payment is not None:
@@ -920,25 +1113,11 @@ async def confirm_cmd(
         )
         return
     if result.applied and full is not None:
-        await trigger_configured_sync(
-            settings.subhub_url,
-            settings.subhub_admin_token,
-            timeout=settings.subhub_timeout_seconds,
+        headline = await _after_applied_payment(
+            message.bot, session, settings, full, result
         )
-        client = await VpnClientRepository(session).get_for_user(full.user_id)
-        if client is not None:
-            await notify.notify_user_extended(
-                message.bot,
-                full.user.telegram_id,
-                client,
-                first_purchase=result.first_purchase,
-                pending_servers=len(result.failed_servers),
-            )
         await message.answer(
-            f"Заявка {code_html} подтверждена. "
-            + ("Ожидается синхронизация серверов."
-               if result.failed_servers else "Доступ продлён."),
-            parse_mode="HTML",
+            f"Заявка {code_html} подтверждена. {escape(headline)}", parse_mode="HTML"
         )
         return
 
@@ -1172,7 +1351,7 @@ async def add_server(
     if not raw:
         await message.answer(
             "Формат: /addserver name|country|panel_url|username|password"
-            "|[kind]|[subscription_base]\n"
+            "|[kind]|[subscription_base]|[standard|whitelist]\n"
             "Пример: /addserver Германия|DE|https://de:2053|admin|pass|direct|"
             "https://de:2096/sub/"
         )
@@ -1428,6 +1607,16 @@ async def import_panel_inbounds(
     if server is None:
         await message.answer("Сервер не найден")
         return
+    if server.purpose == SERVER_PURPOSE_WHITELIST:
+        result = await whitelist.sync_inventory(
+            session, server, timeout=float(settings.xui_request_timeout)
+        )
+        await session.commit()
+        await message.answer(
+            texts.admin_import_inbounds(server_id, result.summary)
+            + "\n\n" + texts.admin_whitelist_inventory(result)
+        )
+        return
     try:
         summary = await provisioning.import_inbounds(
             session, server, timeout=float(settings.xui_request_timeout)
@@ -1541,6 +1730,12 @@ async def bind_panel_client(
     server = await ServerRepository(session).get_by_id(server_id)
     if server is None:
         await message.answer("Сервер не найден")
+        return
+    if server.purpose == SERVER_PURPOSE_WHITELIST:
+        await message.answer(
+            "Привязка выполняется по обычным серверам; конфиг «Обход белых списков» "
+            "создаётся учётом трафика автоматически."
+        )
         return
     target = await UserRepository(session).get_by_telegram_id(telegram_id)
     if target is None:
@@ -1678,3 +1873,408 @@ async def sync_user(
             f"server {r.server_id}: {r.error}" for r in failed
         )
     await message.answer(text)
+
+
+# --- «Обход белых списков» -------------------------------------------------------
+
+
+async def _whitelist_home(session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
+    config = await whitelist.get_config(session)
+    server = await whitelist.get_active_server(session)
+    if server is None:
+        # Показываем и выключенный сервер услуги, чтобы его состояние было видно.
+        server = await session.scalar(
+            select(Server)
+            .where(Server.purpose == SERVER_PURPOSE_WHITELIST)
+            .order_by(Server.id.desc())
+            .options(selectinload(Server.inbounds))
+        )
+    summary = await whitelist.admin_summary(session)
+    packages = await whitelist.list_packages(session, only_enabled=False)
+    candidates = []
+    if server is not None and server.inventory_status == whitelist.INVENTORY_NEEDS_CHOICE:
+        candidates = sorted(server.inbounds, key=lambda i: i.inbound_id)
+    await session.commit()
+    return (
+        texts.admin_whitelist_home(config, server, summary, packages),
+        keyboards.admin_whitelist_keyboard(server, candidates),
+    )
+
+
+def _parse_gb(raw: str) -> int | None:
+    try:
+        value = Decimal(raw.strip().replace(",", "."))
+    except (InvalidOperation, ValueError):
+        return None
+    if value < 0 or value > 100_000:
+        return None
+    return whitelist.gib_to_bytes(value)
+
+
+def _parse_price(raw: str) -> Decimal | None:
+    try:
+        value = Decimal(raw.strip().replace(",", ".").replace("₽", ""))
+    except (InvalidOperation, ValueError):
+        return None
+    if value <= 0 or value > 1_000_000:
+        return None
+    return value.quantize(Decimal("0.01"))
+
+
+_WL_PROMPTS = {
+    "free_paid": "Пришлите бесплатный объём за оплату подписки в ГБ (например 10). "
+    "Применяется к следующим оплатам; текущие остатки не меняются.",
+    "free_trial": "Пришлите бесплатный объём пробного периода в ГБ (например 3).",
+    "pkg_size": "Пришлите новый объём пакета в ГБ. Созданные заявки не изменятся.",
+    "pkg_price": "Пришлите новую цену пакета в рублях. Созданные заявки не изменятся.",
+    "pkg_add": "Пришлите объём в ГБ и цену в рублях через пробел, например: 25 99",
+}
+
+
+@router.callback_query(WhitelistAdminCallback.filter())
+async def whitelist_admin(
+    callback: CallbackQuery,
+    callback_data: WhitelistAdminCallback,
+    session: AsyncSession,
+    db_user: User,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    action = callback_data.action
+    value = callback_data.value
+    logger.info(
+        "Админ tg=%s белые списки действие=%s value=%s", db_user.telegram_id, action, value
+    )
+    updater = _get_updater(settings)
+
+    if action == "home":
+        await state.clear()
+        text, markup = await _whitelist_home(session)
+        await _edit_panel(callback, text, markup)
+        return
+
+    if action in ("sync", "choose"):
+        server = await whitelist.get_active_server(session)
+        if server is None:
+            await ui.answer_callback(callback, "Нет включённого сервера услуги", show_alert=True)
+            return
+        if action == "sync":
+            result = await whitelist.sync_inventory(
+                session, server, timeout=float(settings.xui_request_timeout),
+                actor_user_id=db_user.id,
+            )
+            await session.commit()
+            alert = texts.admin_whitelist_inventory(result)
+        else:
+            try:
+                await whitelist.choose_inbound(session, server, value, db_user.id)
+            except whitelist.WhitelistError as exc:
+                await ui.answer_callback(callback, str(exc), show_alert=True)
+                return
+            alert = f"Целевой inbound: {value}"
+        if whitelist.server_ready(await whitelist.get_active_server(session)):
+            await whitelist.process_due(session, updater)
+        text, markup = await _whitelist_home(session)
+        await _edit_panel(callback, text, markup, alert=alert[:190])
+        return
+
+    if action in _WL_PROMPTS:
+        if action in ("pkg_size", "pkg_price") and await session.get(
+            TrafficPackage, value
+        ) is None:
+            await ui.answer_callback(callback, "Пакет не найден", show_alert=True)
+            return
+        await state.set_state(AdminStates.waiting_whitelist_value)
+        await state.update_data(wl_action=action, wl_value=value)
+        await _edit_panel(
+            callback,
+            _WL_PROMPTS[action] + "\n\nОтмена: /cancel.",
+            keyboards.admin_whitelist_back_keyboard(
+                "packages" if action.startswith("pkg") else "home"
+            ),
+        )
+        return
+
+    if action == "packages":
+        await state.clear()
+        packages = await whitelist.list_packages(session, only_enabled=False)
+        await _edit_panel(
+            callback,
+            texts.admin_whitelist_packages(packages),
+            keyboards.admin_whitelist_packages_keyboard(packages),
+        )
+        return
+
+    if action in ("pkg", "pkg_toggle"):
+        package = await session.get(TrafficPackage, value)
+        if package is None:
+            await ui.answer_callback(callback, "Пакет не найден", show_alert=True)
+            return
+        if action == "pkg_toggle":
+            package = await whitelist.save_package(
+                session, package_id=package.id, enabled=not package.enabled,
+                actor_user_id=db_user.id,
+            )
+        await _edit_panel(
+            callback,
+            texts.admin_whitelist_packages([package]),
+            keyboards.admin_whitelist_package_keyboard(package),
+        )
+        return
+
+    if action == "rollout":
+        plan = await whitelist.rollout_plan(session)
+        config = await whitelist.get_config(session)
+        await session.commit()
+        await _edit_panel(
+            callback,
+            texts.admin_whitelist_rollout_plan(plan, config),
+            keyboards.admin_whitelist_rollout_keyboard(),
+        )
+        return
+
+    if action in ("rollout_all", "rollout_strict"):
+        await ui.answer_callback(callback, "Выдача запущена…")
+        try:
+            report = await whitelist.run_rollout(
+                session,
+                updater,
+                include_ambiguous=action == "rollout_all",
+                actor_user_id=db_user.id,
+            )
+        except whitelist.WhitelistError as exc:
+            await ui.answer(callback, str(exc))
+            return
+        await trigger_configured_sync(
+            settings.subhub_url,
+            settings.subhub_admin_token,
+            timeout=settings.subhub_timeout_seconds,
+        )
+        text, markup = await _whitelist_home(session)
+        await ui.answer(callback, texts.admin_whitelist_rollout_report(report))
+        await ui.edit(callback, text, reply_markup=markup)
+        return
+
+    if action in ("block", "unblock", "usersync"):
+        target = await session.get(User, value)
+        if target is None:
+            await ui.answer_callback(callback, "Пользователь не найден", show_alert=True)
+            return
+        try:
+            if action == "usersync":
+                outcome = await whitelist.sync_user(session, target.id, updater)
+            else:
+                outcome = await whitelist.set_admin_block(
+                    session, target.id, action == "block", db_user.id, updater
+                )
+        except whitelist.WhitelistError as exc:
+            await ui.answer_callback(callback, str(exc), show_alert=True)
+            return
+        if outcome.applied:
+            await trigger_configured_sync(
+                settings.subhub_url,
+                settings.subhub_admin_token,
+                timeout=settings.subhub_timeout_seconds,
+            )
+        text, markup = await _whitelist_user_card(session, target, None)
+        alert = "Применено" if outcome.applied else (
+            f"Сохранено; применение ожидается: {outcome.error or outcome.skipped}"
+        )
+        await _edit_panel(callback, text, markup, alert=alert[:190])
+        return
+
+    await ui.answer_callback(callback, "Неизвестное действие", show_alert=True)
+
+
+@router.message(AdminStates.waiting_whitelist_value, Command("cancel"))
+async def whitelist_value_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Изменение отменено.")
+
+
+@router.message(AdminStates.waiting_whitelist_value, F.text)
+async def whitelist_value_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext,
+    db_user: User,
+) -> None:
+    data = await state.get_data()
+    action = data.get("wl_action")
+    value = data.get("wl_value") or 0
+    raw = (message.text or "").strip()
+    try:
+        if action in ("free_paid", "free_trial"):
+            size = _parse_gb(raw)
+            if size is None:
+                await message.answer("Нужно число ГБ, например 10. Или /cancel.")
+                return
+            await whitelist.set_free_volume(
+                session, trial=action == "free_trial", size_bytes=size,
+                actor_user_id=db_user.id,
+            )
+        elif action == "pkg_size":
+            size = _parse_gb(raw)
+            if not size:
+                await message.answer("Нужен объём больше нуля, например 25. Или /cancel.")
+                return
+            await whitelist.save_package(
+                session, package_id=value, size_bytes=size, actor_user_id=db_user.id
+            )
+        elif action == "pkg_price":
+            price = _parse_price(raw)
+            if price is None:
+                await message.answer("Нужна цена больше нуля, например 99. Или /cancel.")
+                return
+            await whitelist.save_package(
+                session, package_id=value, price=price, actor_user_id=db_user.id
+            )
+        elif action == "pkg_add":
+            parts = raw.split()
+            size = _parse_gb(parts[0]) if len(parts) == 2 else None
+            price = _parse_price(parts[1]) if len(parts) == 2 else None
+            if not size or price is None:
+                await message.answer("Формат: <ГБ> <цена>, например 25 99. Или /cancel.")
+                return
+            await whitelist.save_package(
+                session, package_id=None, size_bytes=size, price=price,
+                actor_user_id=db_user.id,
+            )
+        else:
+            await state.clear()
+            await message.answer("Не удалось определить настройку. Откройте раздел снова.")
+            return
+    except whitelist.WhitelistError as exc:
+        await message.answer(f"{exc}. Или /cancel.")
+        return
+    await state.clear()
+    text, markup = await _whitelist_home(session)
+    await message.answer("Сохранено.\n\n" + text, reply_markup=markup)
+
+
+async def _whitelist_user_card(
+    session: AsyncSession, target: User, updater: PanelUpdater | None
+) -> tuple[str, InlineKeyboardMarkup]:
+    overview = await whitelist.user_overview(session, target.id, updater)
+    account = await whitelist.get_account(session, target.id)
+    events = await whitelist.list_open_events(session, target.id)
+    outcomes = whitelist.uncertain_outcomes(account, events) if account else None
+    await session.commit()
+    text = texts.admin_whitelist_user(target, account, overview, events, outcomes)
+    markup = keyboards.admin_whitelist_user_keyboard(
+        target.id, bool(account and account.admin_blocked)
+    )
+    return text, markup
+
+
+@router.message(Command("wl"))
+async def whitelist_user_cmd(
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    raw = (command.args or "").strip()
+    if not raw:
+        await message.answer("Использование: /wl <telegram_id или ID подписки>")
+        return
+    repo = UserRepository(session)
+    target = await repo.get_by_telegram_id(int(raw)) if raw.isdigit() else None
+    if target is None:
+        target = await repo.get_by_public_id(raw)
+    if target is None:
+        await message.answer("Пользователь не найден")
+        return
+    text, markup = await _whitelist_user_card(session, target, _get_updater(settings))
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(Command("wladjust"))
+async def whitelist_adjust_cmd(
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    db_user: User,
+    settings: Settings,
+) -> None:
+    parts = (command.args or "").split(maxsplit=3)
+    usage = (
+        "Использование: /wladjust <telegram_id> <бесплатно ГБ|-> <куплено ГБ|-> <причина>\n"
+        "Задаёт остатки (а не прибавляет). «-» — не менять."
+    )
+    if len(parts) < 4 or not parts[0].isdigit():
+        await message.answer(usage)
+        return
+    free = None if parts[1] == "-" else _parse_gb(parts[1])
+    paid = None if parts[2] == "-" else _parse_gb(parts[2])
+    if (parts[1] != "-" and free is None) or (parts[2] != "-" and paid is None):
+        await message.answer(usage)
+        return
+    target = await UserRepository(session).get_by_telegram_id(int(parts[0]))
+    if target is None:
+        await message.answer("Пользователь не найден")
+        return
+    try:
+        outcome = await whitelist.adjust_balance(
+            session,
+            target.id,
+            free_bytes=free,
+            paid_bytes=paid,
+            actor_user_id=db_user.id,
+            reason=parts[3],
+            updater=_get_updater(settings),
+        )
+    except whitelist.WhitelistError as exc:
+        await session.rollback()
+        await message.answer(f"Не изменено: {exc}")
+        return
+    text, markup = await _whitelist_user_card(session, target, None)
+    status = "Применено на сервере." if outcome.applied else "Сохранено; применение ожидается."
+    await message.answer(f"{status}\n\n{text}", reply_markup=markup)
+
+
+_RESOLVE_CHOICES = {
+    "до": whitelist.RESOLVE_BEFORE,
+    "before": whitelist.RESOLVE_BEFORE,
+    "после": whitelist.RESOLVE_AFTER,
+    "after": whitelist.RESOLVE_AFTER,
+}
+
+
+@router.message(Command("wlresolve"))
+async def whitelist_resolve_cmd(
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    db_user: User,
+    settings: Settings,
+) -> None:
+    parts = (command.args or "").split(maxsplit=2)
+    usage = (
+        "Использование: /wlresolve <telegram_id> <до|после> <причина>\n"
+        "Относит расход, который нельзя разделить автоматически, до или после "
+        "первого ожидающего начисления. Варианты остатков — в /wl."
+    )
+    if len(parts) < 3 or not parts[0].isdigit() or parts[1].lower() not in _RESOLVE_CHOICES:
+        await message.answer(usage)
+        return
+    target = await UserRepository(session).get_by_telegram_id(int(parts[0]))
+    if target is None:
+        await message.answer("Пользователь не найден")
+        return
+    try:
+        outcome = await whitelist.resolve_uncertain(
+            session,
+            target.id,
+            choice=_RESOLVE_CHOICES[parts[1].lower()],
+            actor_user_id=db_user.id,
+            reason=parts[2],
+            updater=_get_updater(settings),
+        )
+    except whitelist.WhitelistError as exc:
+        await session.rollback()
+        await message.answer(f"Не изменено: {exc}")
+        return
+    text, markup = await _whitelist_user_card(session, target, None)
+    status = "Применено на сервере." if outcome.applied else "Сохранено; применение ожидается."
+    await message.answer(f"{status}\n\n{text}", reply_markup=markup)

@@ -14,7 +14,7 @@ from app.bot.router import build_root_router
 from app.config import Settings, get_settings
 from app.db.session import get_sessionmaker
 from app.logging_config import setup_logging
-from app.services import antishare, billing, expiry, health
+from app.services import antishare, billing, expiry, health, whitelist
 from app.services.ip_provider import build_ip_provider
 from app.services.subhub_client import trigger_configured_sync
 from app.services.web_bridge import delivery_loop, start_bridge
@@ -62,6 +62,14 @@ async def _server_health_poller(settings: Settings) -> None:
     timeout = min(float(settings.xui_request_timeout), 10.0)
     updater = build_updater(timeout=float(settings.xui_request_timeout))
     sessionmaker = get_sessionmaker()
+
+    def subhub_sync():  # type: ignore[no-untyped-def]
+        return trigger_configured_sync(
+            settings.subhub_url,
+            settings.subhub_admin_token,
+            timeout=settings.subhub_timeout_seconds,
+        )
+
     while True:
         try:
             async with sessionmaker() as session:
@@ -70,15 +78,51 @@ async def _server_health_poller(settings: Settings) -> None:
                     session,
                     timeout=timeout,
                     updater=updater,
-                    on_updates_applied=lambda: trigger_configured_sync(
-                        settings.subhub_url,
-                        settings.subhub_admin_token,
-                        timeout=settings.subhub_timeout_seconds,
-                    ),
+                    on_updates_applied=subhub_sync,
                 )
         except Exception:  # noqa: BLE001 - фоновая задача не должна падать
             logger.exception("Ошибка фоновой проверки серверов")
+        try:
+            async with sessionmaker() as session:
+                if await whitelist.process_due(session, updater):
+                    await subhub_sync()
+        except Exception:  # noqa: BLE001 - фоновая задача не должна падать
+            logger.exception("Ошибка фоновой синхронизации «Обход белых списков»")
         await asyncio.sleep(interval)
+
+
+async def _whitelist_reconcile_poller(settings: Settings) -> None:
+    """Фоновая сверка расхода whitelist-услуги: полный обход пачками.
+
+    Работает отдельно от проверки серверов: длительный обход не задерживает
+    очередь применения квот. Период — пауза между обходами, а не гарантированное
+    время сверки: обход идёт столько, сколько нужно пачкам и паузам.
+    """
+    interval = settings.whitelist_reconcile_minutes * 60
+    updater = build_updater(timeout=float(settings.xui_request_timeout))
+    sessionmaker = get_sessionmaker()
+    loop = asyncio.get_running_loop()
+    while True:
+        started = loop.time()
+        complete = False
+        try:
+            async with sessionmaker() as session:
+                report = await whitelist.reconcile_cycle(
+                    session,
+                    updater,
+                    batch_size=settings.whitelist_reconcile_batch_size,
+                    pause_seconds=settings.whitelist_reconcile_batch_pause_seconds,
+                    status=whitelist.RECONCILE_STATUS,
+                )
+            complete = report.complete
+        except Exception as exc:  # noqa: BLE001 - фоновая задача не должна падать
+            whitelist.RECONCILE_STATUS.last_run_note = f"ошибка: {type(exc).__name__}"
+            logger.exception("Ошибка фоновой сверки расхода «Обход белых списков»")
+        await asyncio.sleep(
+            whitelist.next_reconcile_delay(
+                interval, loop.time() - started, complete=complete
+            )
+        )
 
 
 async def _expiry_notify_poller(bot: Bot, settings: Settings) -> None:
@@ -148,6 +192,10 @@ async def run() -> None:
             "лишний текст или незаполненный токен)."
         ) from None
 
+    async with get_sessionmaker()() as session:
+        # Идемпотентно: настройки и начальные пакеты услуги, если их нет.
+        await whitelist.ensure_defaults(session)
+
     bot = Bot(
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=None),
@@ -173,6 +221,17 @@ async def run() -> None:
         logger.info(
             "Проверка доступности серверов включена, период: %s c",
             settings.server_health_poll_seconds,
+        )
+    if settings.whitelist_reconcile_minutes > 0:
+        background_tasks.append(
+            asyncio.create_task(_whitelist_reconcile_poller(settings))
+        )
+        logger.info(
+            "Сверка расхода «Обход белых списков» включена: пауза между обходами "
+            "%s мин, пачка %s, пауза между пачками %s c",
+            settings.whitelist_reconcile_minutes,
+            settings.whitelist_reconcile_batch_size,
+            settings.whitelist_reconcile_batch_pause_seconds,
         )
     if settings.expiry_notify_poll_seconds > 0:
         background_tasks.append(

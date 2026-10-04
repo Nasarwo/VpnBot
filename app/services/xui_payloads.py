@@ -73,8 +73,14 @@ def build_client_record(
     limit_ip: int = 0,
     total_gb: int = 0,
     tg_id: int = 0,
+    enable: bool = True,
+    quota_policy: bool = False,
 ) -> dict[str, object]:
     """Унифицированный объект клиента для нового client-API (3x-ui >= 3.2.x).
+
+    ``total_gb`` — значение поля totalGB в байтах (0 — безлимит).
+    ``quota_policy`` — клиент с учётом трафика: автоматические сбросы панели
+    выключены, чтобы счётчик расхода не обнулялся без ведома бота.
 
     Один клиент привязывается сразу к нескольким inbound'ам разных протоколов.
     Панель сама подставляет нужные поля по протоколу каждого inbound (id для
@@ -87,16 +93,29 @@ def build_client_record(
         "auth": password,
         "email": email,
         "subId": sub_id,
-        "enable": True,
+        "enable": enable,
         "expiryTime": expiry_ms,
         "limitIp": limit_ip,
         "totalGB": total_gb,
         "tgId": tg_id,
         "reset": 0,
     }
+    if quota_policy:
+        obj.update(_QUOTA_RESET_POLICY)
     if flow:
         obj["flow"] = flow
     return obj
+
+
+# Панель не должна сама обнулять счётчик или продлевать клиента с квотой:
+# бесплатный пакет выдаётся только при оплате, а не по календарю.
+_QUOTA_RESET_POLICY: dict[str, object] = {
+    "reset": 0,
+    "resetDay": 0,
+    "resetWeekday": 0,
+    "resetMax": 0,
+    "trafficReset": "never",
+}
 
 
 def _looks_like_db_id(value: str) -> bool:
@@ -141,17 +160,24 @@ def merge_client_record_for_update(
     enable: bool = True,
     flow: str | None = None,
     tg_id: int | None = None,
+    total_bytes: int | None = None,
+    quota_policy: bool = False,
 ) -> dict[str, Any]:
     """Тело ``clients/update``: сохраняет секреты панели, меняет срок и enable.
 
     Поля ``id``, ``password``, ``auth``, ``method`` и пр. не перезаписываются —
     иначе ломаются мультипротокольные клиенты (hysteria auth ≠ vless uuid).
+    ``total_bytes=None`` сохраняет прежний totalGB панели (обычные серверы).
     """
     merged = dict(existing)
     merged["email"] = email
     merged["subId"] = sub_id
     merged["enable"] = enable
     merged["expiryTime"] = expiry_ms
+    if total_bytes is not None:
+        merged["totalGB"] = total_bytes
+    if quota_policy:
+        merged.update(_QUOTA_RESET_POLICY)
     if tg_id is not None:
         merged["tgId"] = tg_id
     if flow and not merged.get("flow"):

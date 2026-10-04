@@ -60,16 +60,18 @@ async def notify_user_extended(
     *,
     first_purchase: bool = False,
     pending_servers: int = 0,
+    whitelist_pending: bool = False,
 ) -> None:
     if telegram_id is None:
         return
+    text = (
+        texts.access_update_pending(client, pending_servers)
+        if pending_servers else texts.access_extended(client)
+    )
+    if whitelist_pending:
+        text += texts.whitelist_pending_note()
     try:
-        await bot.send_message(
-            telegram_id,
-            texts.access_update_pending(client, pending_servers)
-            if pending_servers else texts.access_extended(client),
-            parse_mode="HTML",
-        )
+        await bot.send_message(telegram_id, text, parse_mode="HTML")
     except TelegramAPIError:
         logger.warning("Не удалось уведомить пользователя %s", telegram_id)
         return
@@ -206,3 +208,23 @@ async def notify_admins_failed(
             )
         except TelegramAPIError:
             logger.warning("Не удалось уведомить админа %s об ошибке", admin_id)
+
+
+async def notify_user_traffic_credited(
+    bot: Bot,
+    telegram_id: int | None,
+    size_bytes: int | None,
+    *,
+    active: bool,
+    pending: bool,
+) -> None:
+    if telegram_id is None:
+        return
+    text = (
+        texts.traffic_credited(size_bytes, pending)
+        if active else texts.traffic_credited_expired(size_bytes)
+    )
+    try:
+        await bot.send_message(telegram_id, text, parse_mode="HTML")
+    except TelegramAPIError:
+        logger.warning("Не удалось уведомить пользователя %s о трафике", telegram_id)

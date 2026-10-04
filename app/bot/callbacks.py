@@ -53,3 +53,26 @@ class AdminCallback(CallbackData, prefix="adm"):
 
     action: str
     server_id: int = 0
+
+
+class WhitelistCallback(CallbackData, prefix="wl"):
+    """Пользовательский раздел «Обход белых списков».
+
+    action: home | refresh | buy (value — id пакета)
+    """
+
+    action: str
+    value: int = 0
+
+
+class WhitelistAdminCallback(CallbackData, prefix="wla"):
+    """Админ-раздел услуги «Обход белых списков».
+
+    action: home | sync | choose (value — inbound) | free_paid | free_trial |
+            packages | pkg | pkg_size | pkg_price | pkg_toggle | pkg_add |
+            rollout | rollout_all | rollout_strict | block | unblock | usersync
+            (value — id пакета или пользователя)
+    """
+
+    action: str
+    value: int = 0

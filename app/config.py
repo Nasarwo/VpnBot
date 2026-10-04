@@ -68,6 +68,16 @@ class Settings(BaseSettings):
     # Период проверки истекающих подписок для уведомлений, секунды (0 — отключить).
     expiry_notify_poll_seconds: int = Field(default=300, ge=0)
 
+    # «Обход белых списков»: период фоновой сверки расхода с панелью, минуты
+    # (0 — только при операциях и просмотре баланса).
+    # Это пауза между обходами, а не время, за которое обход гарантированно
+    # завершится: обход идёт пачками с паузами и длится дольше при росте числа
+    # учётов или медленной панели.
+    whitelist_reconcile_minutes: int = Field(default=15, ge=0)
+    # Учётов в одной пачке чтения панели и пауза между пачками, секунды.
+    whitelist_reconcile_batch_size: int = Field(default=100, ge=1, le=1000)
+    whitelist_reconcile_batch_pause_seconds: float = Field(default=1.0, ge=0)
+
     @field_validator("bot_token", mode="before")
     @classmethod
     def _clean_bot_token(cls, value: object) -> object:

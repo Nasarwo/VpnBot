@@ -725,6 +725,35 @@ class XuiClient:
 
     # --- Трафик / IP --------------------------------------------------------
 
+    async def get_client_usage(self, email: str) -> dict[str, Any] | None:
+        """Строка client_traffics глобального клиента (3x-ui >= 3.2, clients API).
+
+        ``GET /panel/api/clients/traffic/{email}`` возвращает xray.ClientTraffic:
+        ``id`` (ключ строки), ``up``/``down``/``total`` в байтах, ``enable`` и
+        ``lastOnline`` (мс; обновляется при ненулевом приросте трафика).
+        ``obj: null`` — строки статистики нет. Ошибки чтения не превращаются в
+        «нулевой расход»: при любом сбое поднимается XuiError.
+        """
+        encoded = _quote_path_segment(email)
+        response = await self._api("GET", f"/panel/api/clients/traffic/{encoded}")
+        if response.status_code != 200:
+            raise XuiError(
+                f"Не удалось прочитать трафик клиента: HTTP {response.status_code}"
+            )
+        data = self._parse_json(response)
+        if not data.get("success", False):
+            raise XuiError(f"Не удалось прочитать трафик клиента: {data.get('msg')}")
+        obj = data.get("obj")
+        if obj is None:
+            return None
+        if not isinstance(obj, dict):
+            raise XuiError("Некорректная статистика трафика клиента")
+        for key in ("up", "down"):
+            value = obj.get(key, 0)
+            if type(value) is not int or value < 0:
+                raise XuiError("Некорректная статистика трафика клиента")
+        return obj
+
     async def get_client_traffic(self, email: str) -> dict[str, Any] | None:
         """Возвращает статистику трафика клиента по email."""
         encoded = _quote_path_segment(email)

@@ -9,6 +9,8 @@ from sqlalchemy.orm import selectinload
 
 from app.db.enums import AttachmentType, BindRequestStatus, PaymentStatus, Protocol, UserRole
 from app.db.models import (
+    PAYMENT_KIND_SUBSCRIPTION,
+    SERVER_PURPOSE_STANDARD,
     AuditLog,
     BindRequest,
     ClientServerMapping,
@@ -240,16 +242,22 @@ class ServerRepository:
         await self.session.flush()
         return True
 
-    async def list_enabled(self) -> list[Server]:
-        result = await self.session.execute(
-            select(Server).where(Server.enabled.is_(True))
-        )
+    async def list_enabled(
+        self, purpose: str | None = SERVER_PURPOSE_STANDARD
+    ) -> list[Server]:
+        """Включённые серверы. По умолчанию — только обычные (безлимитные)."""
+        query = select(Server).where(Server.enabled.is_(True))
+        if purpose is not None:
+            query = query.where(Server.purpose == purpose)
+        result = await self.session.execute(query)
         return list(result.scalars().all())
 
     async def list_enabled_with_inbounds(self) -> list[Server]:
+        """Цели обычного provisioning: whitelist-сервер ведётся отдельно."""
         result = await self.session.execute(
             select(Server)
             .where(Server.enabled.is_(True))
+            .where(Server.purpose == SERVER_PURPOSE_STANDARD)
             .options(selectinload(Server.inbounds))
             .order_by(Server.id.asc())
             .execution_options(populate_existing=True)
@@ -313,6 +321,7 @@ class ServerRepository:
             select(ServerInbound.id)
             .join(Server, Server.id == ServerInbound.server_id)
             .where(Server.enabled.is_(True))
+            .where(Server.purpose == SERVER_PURPOSE_STANDARD)
             .where(ServerInbound.enabled.is_(True))
             .limit(1)
         )
@@ -451,12 +460,14 @@ class PaymentRepository:
         return int(result.scalar_one())
 
     async def count_applied_for_user(self, user_id: int) -> int:
+        """Число применённых оплат подписки (покупки трафика не учитываются)."""
         from sqlalchemy import func
 
         result = await self.session.execute(
             select(func.count(PaymentRequest.id))
             .where(PaymentRequest.user_id == user_id)
             .where(PaymentRequest.status == PaymentStatus.APPLIED)
+            .where(PaymentRequest.kind == PAYMENT_KIND_SUBSCRIPTION)
         )
         return int(result.scalar_one())
 
@@ -488,6 +499,7 @@ class PaymentRepository:
         result = await self.session.execute(
             select(PaymentRequest)
             .where(PaymentRequest.user_id == user_id)
+            .where(PaymentRequest.kind == PAYMENT_KIND_SUBSCRIPTION)
             .where(
                 PaymentRequest.status.in_(
                     [PaymentStatus.APPLIED, PaymentStatus.CONFIRMED]

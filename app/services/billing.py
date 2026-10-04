@@ -8,14 +8,21 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.enums import PaymentStatus
-from app.db.models import PaymentRequest, User, VpnClient
+from app.db.models import (
+    PAYMENT_KIND_SUBSCRIPTION,
+    PAYMENT_KIND_TRAFFIC,
+    SERVER_PURPOSE_STANDARD,
+    PaymentRequest,
+    User,
+    VpnClient,
+)
 from app.db.repositories import (
     MappingRepository,
     PaymentRepository,
     ServerRepository,
     VpnClientRepository,
 )
-from app.services import audit, pending_updates, provisioning
+from app.services import audit, pending_updates, provisioning, whitelist
 from app.services.operation_lock import serialized_access
 from app.services.panel_updater import PanelUpdateError, PanelUpdater, ServerUpdateResult
 
@@ -34,6 +41,11 @@ class BillingResult:
     first_purchase: bool = False
     new_expires_at: datetime | None = None
     failed_servers: list[ServerUpdateResult] = field(default_factory=list)
+    # «Обход белых списков»: оплата сохранена, а сверка расхода или применение
+    # на сервере ожидается.
+    whitelist_pending: bool = False
+    # Для покупки трафика — начисленный объём (байты).
+    traffic_bytes: int | None = None
 
 
 @dataclass(slots=True)
@@ -43,6 +55,7 @@ class TrialResult:
     no_client: bool = False
     new_expires_at: datetime | None = None
     failed_servers: list[ServerUpdateResult] = field(default_factory=list)
+    whitelist_pending: bool = False
 
 
 def _utcnow() -> datetime:
@@ -138,6 +151,9 @@ async def _apply_panels(
         server = mapping.server
         if server is None or not server.enabled or not mapping.enabled:
             continue
+        if server.purpose != SERVER_PURPOSE_STANDARD:
+            # Квота whitelist-сервера ведётся отдельным учётом трафика.
+            continue
         configured = await ServerRepository(session).get_with_inbounds(server.id)
         if configured is not None and configured.inbounds:
             results.append(ServerUpdateResult(
@@ -215,6 +231,7 @@ async def _extend_and_finalize(
             select(func.max(PaymentRequest.target_expires_at)).where(
                 PaymentRequest.user_id == payment.user_id,
                 PaymentRequest.status == PaymentStatus.CONFIRMED,
+                PaymentRequest.kind == PAYMENT_KIND_SUBSCRIPTION,
             )
         )
         base = max(
@@ -227,6 +244,11 @@ async def _extend_and_finalize(
                          _as_aware(client.expires_at) or now)
     eligible_mappings = await _count_eligible_mappings(session, client.id)
 
+    # Бесплатный пакет услуги фиксируется в той же транзакции, что и target:
+    # повтор/рестарт после commit не выдаст его второй раз (ключ payment:<id>).
+    # Выдача — упорядоченное событие учёта: если расход до оплаты не прочитан,
+    # прежние остатки не заменяются до его сверки (оплата при этом сохранена).
+    await whitelist.grant_for_subscription_payment(session, payment, updater, actor_user_id, now)
     await _persist_target_before_panels(session, payment, new_expiry, now)
     await session.refresh(payment)
     await session.refresh(client)
@@ -317,12 +339,14 @@ async def _extend_and_finalize(
         },
     )
     await session.commit()
+    wl = await whitelist.after_access_change(session, payment.user_id, updater)
     return BillingResult(
         payment=payment,
         applied=True,
         first_purchase=first_purchase,
         new_expires_at=new_expiry,
         failed_servers=failed,
+        whitelist_pending=wl.pending or wl.unsettled,
     )
 
 
@@ -352,6 +376,10 @@ async def confirm_payment(
         actor_user_id,
     )
 
+    if payment.kind == PAYMENT_KIND_TRAFFIC:
+        # Покупка трафика не проходит через начисление дней и выдачу пакета.
+        return await _confirm_traffic(session, payment, actor_user_id, updater, now)
+
     if payment.status == PaymentStatus.APPLIED:
         return BillingResult(payment=payment, applied=False, already_applied=True)
 
@@ -361,6 +389,38 @@ async def confirm_payment(
         )
 
     return await _extend_and_finalize(session, payment, actor_user_id, updater, now)
+
+
+async def _confirm_traffic(
+    session: AsyncSession,
+    payment: PaymentRequest,
+    actor_user_id: int | None,
+    updater: PanelUpdater,
+    now: datetime,
+) -> BillingResult:
+    try:
+        result = await whitelist.confirm_traffic_payment(
+            session, payment, actor_user_id, updater, now
+        )
+    except whitelist.WhitelistError as exc:
+        raise BillingError(str(exc)) from exc
+    if result.already_applied:
+        # Повтор подтверждения ничего не начисляет, но догоняет панель.
+        await whitelist.after_access_change(session, payment.user_id, updater)
+        # Ожидание могло сняться в отдельной сессии применения.
+        await session.refresh(payment, ["apply_pending_version"])
+        return BillingResult(
+            payment=payment, applied=False, already_applied=True,
+            traffic_bytes=result.size_bytes,
+        )
+    return BillingResult(
+        payment=payment,
+        applied=True,
+        traffic_bytes=result.size_bytes,
+        whitelist_pending=bool(
+            result.sync and (result.sync.pending or result.sync.unsettled)
+        ),
+    )
 
 
 @serialized_access("payment_id", "payment")
@@ -377,6 +437,9 @@ async def retry_payment(
     payment = await repo.get_by_id_for_update(payment_id)
     if payment is None:
         raise BillingError("Заявка не найдена")
+
+    if payment.kind == PAYMENT_KIND_TRAFFIC:
+        return await _confirm_traffic(session, payment, actor_user_id, updater, now)
 
     if payment.status == PaymentStatus.APPLIED:
         return BillingResult(payment=payment, applied=False, already_applied=True)
@@ -437,7 +500,12 @@ async def manual_extend(
         payload={"new_expires_at": new_expiry.isoformat()},
     )
     await session.commit()
-    return BillingResult(payment=None, applied=True, new_expires_at=new_expiry)
+    # Ручное изменение срока переносится на конфиг, но пакет не выдаёт.
+    wl = await whitelist.after_access_change(session, client.user_id, updater)
+    return BillingResult(
+        payment=None, applied=True, new_expires_at=new_expiry,
+        whitelist_pending=wl.pending or wl.unsettled,
+    )
 
 
 @serialized_access("vpn_client_id", "client")
@@ -465,6 +533,7 @@ async def sync_client(
         entity_id=client.id,
     )
     await session.commit()
+    await whitelist.after_access_change(session, client.user_id, updater)
     return results
 
 
@@ -545,10 +614,17 @@ async def grant_trial(
         entity_id=client.id,
         payload={"new_expires_at": new_expiry.isoformat(), "period_days": period_days},
     )
+    # Пакет пробного периода сохраняется вместе с отметкой trial_used.
+    await whitelist.grant_for_trial(session, user_id, updater, now)
     await session.commit()
-    return TrialResult(applied=True, new_expires_at=new_expiry)
+    wl = await whitelist.after_access_change(session, user_id, updater)
+    return TrialResult(
+        applied=True, new_expires_at=new_expiry,
+        whitelist_pending=wl.pending or wl.unsettled,
+    )
 
 
+@serialized_access("payment_id", "payment")
 async def reject_payment(
     session: AsyncSession,
     payment_id: int,
@@ -556,14 +632,20 @@ async def reject_payment(
     comment: str | None = None,
     now: datetime | None = None,
 ) -> PaymentRequest:
-    """Отклонение заявки администратором."""
+    """Отклонение заявки администратором.
+
+    Сериализуется с подтверждением: отклонение не может перезаписать уже
+    применённую (и начисленную) заявку.
+    """
     now = now or _utcnow()
     repo = PaymentRepository(session)
-    payment = await repo.get_by_id(payment_id)
+    payment = await repo.get_by_id_for_update(payment_id)
     if payment is None:
         raise BillingError("Заявка не найдена")
 
-    if payment.status in (PaymentStatus.APPLIED, PaymentStatus.REJECTED):
+    if payment.status in (
+        PaymentStatus.APPLIED, PaymentStatus.REJECTED, PaymentStatus.CONFIRMED
+    ):
         return payment
 
     payment.status = PaymentStatus.REJECTED
@@ -584,6 +666,7 @@ async def recover_confirmed_payments(session: AsyncSession, updater: PanelUpdate
     identifiers = (await session.scalars(
         select(PaymentRequest.id).where(
             PaymentRequest.status == PaymentStatus.CONFIRMED,
+            PaymentRequest.kind == PAYMENT_KIND_SUBSCRIPTION,
             PaymentRequest.target_expires_at.is_not(None),
             PaymentRequest.confirmed_at < _utcnow() - timedelta(minutes=5),
         ).order_by(PaymentRequest.id).limit(10)

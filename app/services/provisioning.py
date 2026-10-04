@@ -193,6 +193,32 @@ async def apply_access_to_server(
     return ServerUpdateResult(server_id=server.id, ok=True)
 
 
+async def client_identity(
+    session: AsyncSession, vpn_client: VpnClient, public_id: str
+) -> tuple[str, str, str]:
+    """(email, sub_id, secret) общей идентичности подписки клиента.
+
+    Существующая привязка (в т.ч. импортированный клиент панели) задаёт
+    идентичность для всех серверов, чтобы SubHub объединял конфиги в одну ссылку.
+    """
+    existing_mappings = await MappingRepository(session).list_for_client(vpn_client.id)
+    anchor = existing_mappings[0] if existing_mappings else None
+    if anchor is not None:
+        return anchor.email, anchor.sub_id or public_id, anchor.client_uuid
+    secret = vpn_client.external_client_id or _new_secret()
+    return client_email(public_id), public_id, secret
+
+
+def build_provision_spec(
+    email: str,
+    sub_id: str,
+    secret: str,
+    inbounds: list[ServerInbound],
+    telegram_id: int | None,
+) -> ServerProvision:
+    return _build_spec(email, sub_id, secret, inbounds, telegram_id=telegram_id)
+
+
 async def apply_access(
     session: AsyncSession,
     vpn_client: VpnClient,

@@ -7,7 +7,14 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import PaymentRequest, PendingServerUpdate, Server, User, VpnClient
+from app.db.models import (
+    SERVER_PURPOSE_STANDARD,
+    PaymentRequest,
+    PendingServerUpdate,
+    Server,
+    User,
+    VpnClient,
+)
 from app.db.repositories import (
     MappingRepository,
     PendingServerUpdateRepository,
@@ -100,6 +107,14 @@ async def apply_pending_update(
         return PendingApplyResult(
             update_id=update.id, server_id=server.id, ok=False,
             error="server disabled",
+        )
+    if server.purpose != SERVER_PURPOSE_STANDARD:
+        # Квоту whitelist-сервера применяет отдельная очередь учёта трафика.
+        update.status = "failed"
+        update.last_error = "whitelist server is managed by traffic accounting"
+        await session.flush()
+        return PendingApplyResult(
+            update_id=update.id, server_id=server.id, ok=False, error=update.last_error,
         )
 
     expiry = _as_aware(update.target_expires_at)

@@ -14,9 +14,11 @@ from app.bot.callbacks import (
     OnboardCallback,
     PaymentCallback,
     PlanCallback,
+    WhitelistAdminCallback,
+    WhitelistCallback,
 )
 from app.bot.emoji import custom_emoji_id
-from app.db.models import Server
+from app.db.models import SERVER_PURPOSE_WHITELIST, Server
 from app.services.plans import PLANS
 
 # Подписи кнопок-тарифов (как просил пользователь): короткие формы.
@@ -83,7 +85,18 @@ def cancel_payment_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def welcome_menu(has_access: bool, is_admin: bool = False) -> InlineKeyboardMarkup:
+def _whitelist_button() -> InlineKeyboardButton:
+    return _btn(
+        texts.BTN_WHITELIST,
+        callback_data=WhitelistCallback(action="home").pack(),
+        style="success",
+        icon="connect",
+    )
+
+
+def welcome_menu(
+    has_access: bool, is_admin: bool = False, show_whitelist: bool = False
+) -> InlineKeyboardMarkup:
     """Главное меню под приветствием. Зависит от наличия активной подписки."""
     rows: list[list[InlineKeyboardButton]] = []
     if is_admin:
@@ -124,6 +137,8 @@ def welcome_menu(has_access: bool, is_admin: bool = False) -> InlineKeyboardMark
             icon="buy",
         )
         rows.append([primary])
+    if show_whitelist:
+        rows.append([_whitelist_button()])
     support = _btn(
         texts.BTN_SUPPORT,
         callback_data=MenuCallback(action="support").pack(),
@@ -244,29 +259,64 @@ def news_channel_keyboard(back_action: str | None = None) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def subscription_menu() -> InlineKeyboardMarkup:
-    """Меню активной подписки: продлить / подключение / назад."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
+def subscription_menu(show_whitelist: bool = False) -> InlineKeyboardMarkup:
+    """Меню активной подписки: продлить / подключение / услуга / назад."""
+    rows = [
+        [
+            _btn(
+                texts.BTN_EXTEND,
+                callback_data=MenuCallback(action="extend").pack(),
+                style="primary",
+                icon="extend",
+            )
+        ],
+        [
+            _btn(
+                texts.BTN_CONNECT,
+                callback_data=MenuCallback(action="connect").pack(),
+                style="success",
+                icon="connect",
+            )
+        ],
+    ]
+    if show_whitelist:
+        rows.append([_whitelist_button()])
+    rows.append([_back_button("home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def whitelist_keyboard(overview) -> InlineKeyboardMarkup:
+    """Раздел «Обход белых списков»: пакеты, обновление, назад."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if overview.can_buy:
+        for package in overview.packages:
+            rows.append([
                 _btn(
-                    texts.BTN_EXTEND,
-                    callback_data=MenuCallback(action="extend").pack(),
+                    texts.whitelist_package_button(package),
+                    callback_data=WhitelistCallback(action="buy", value=package.id).pack(),
                     style="primary",
-                    icon="extend",
+                    icon="paid",
                 )
-            ],
-            [
-                _btn(
-                    texts.BTN_CONNECT,
-                    callback_data=MenuCallback(action="connect").pack(),
-                    style="success",
-                    icon="connect",
-                )
-            ],
-            [_back_button("home")],
-        ]
-    )
+            ])
+    if overview.status not in ("not_launched", "lifetime"):
+        rows.append([
+            _btn(
+                texts.BTN_WHITELIST_REFRESH,
+                callback_data=WhitelistCallback(action="refresh").pack(),
+                icon="extend",
+            )
+        ])
+    if overview.status in ("expired", "no_access"):
+        rows.append([
+            _btn(
+                texts.BTN_EXTEND,
+                callback_data=MenuCallback(action="buy").pack(),
+                style="success",
+                icon="extend",
+            )
+        ])
+    rows.append([_back_button("home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def extend_plans_keyboard() -> InlineKeyboardMarkup:
@@ -360,6 +410,8 @@ def admin_home_keyboard() -> InlineKeyboardMarkup:
                   icon="server")],
             [_btn("Заявки в ожидании", callback_data=_adm("pending"),
                   style="success", icon="subscription")],
+            [_btn(texts.BTN_WHITELIST, callback_data=_wla("home"),
+                  style="primary", icon="connect")],
             [_btn("Удалить инбаунды", callback_data=_adm("delete_subscription"),
                   style="danger", icon="cancel")],
             [_btn("Рассылка всем", callback_data=_adm("broadcast"),
@@ -370,6 +422,101 @@ def admin_home_keyboard() -> InlineKeyboardMarkup:
                   style="primary", icon="unknown")],
             [_btn(texts.BTN_BACK, callback_data=MenuCallback(action="home").pack(),
                   icon="back")],
+        ]
+    )
+
+
+def _wla(action: str, value: int = 0) -> str:
+    return WhitelistAdminCallback(action=action, value=value).pack()
+
+
+def admin_add_server_type_keyboard() -> InlineKeyboardMarkup:
+    """Выбор назначения нового сервера."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("Обычный VPN", callback_data=_adm("add_standard"), style="primary",
+                  icon="server")],
+            [_btn(texts.BTN_WHITELIST, callback_data=_adm("add_whitelist"),
+                  style="success", icon="connect")],
+            [_btn(texts.BTN_BACK, callback_data=_adm("servers"), icon="back")],
+        ]
+    )
+
+
+def admin_whitelist_keyboard(server, candidates=()) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if server is not None:
+        rows.append([_btn("Синхронизировать сервер", callback_data=_wla("sync"),
+                          style="success", icon="extend")])
+        for inbound in candidates:
+            label = f"Целевой inbound {inbound.inbound_id} ({inbound.protocol.value})"
+            if inbound.remark:
+                label += f" {inbound.remark}"
+            rows.append([_btn(label[:60], callback_data=_wla("choose", inbound.inbound_id))])
+    rows.extend([
+        [_btn("Бесплатно за оплату", callback_data=_wla("free_paid"))],
+        [_btn("Бесплатно за trial", callback_data=_wla("free_trial"))],
+        [_btn("Пакеты покупки", callback_data=_wla("packages"), icon="paid")],
+        [_btn("Выдать текущим пользователям", callback_data=_wla("rollout"),
+              style="success", icon="add")],
+        [_btn(texts.BTN_BACK, callback_data=_adm("home"), icon="back")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_whitelist_back_keyboard(action: str = "home") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[_btn(texts.BTN_BACK, callback_data=_wla(action), icon="back")]]
+    )
+
+
+def admin_whitelist_packages_keyboard(packages) -> InlineKeyboardMarkup:
+    rows = [
+        [_btn(f"#{p.id}: {texts.whitelist_package_button(p)}"
+              + ("" if p.enabled else " (выкл)"),
+              callback_data=_wla("pkg", p.id))]
+        for p in packages
+    ]
+    rows.append([_btn("Добавить пакет", callback_data=_wla("pkg_add"), style="success",
+                      icon="add")])
+    rows.append([_btn(texts.BTN_BACK, callback_data=_wla("home"), icon="back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_whitelist_package_keyboard(package) -> InlineKeyboardMarkup:
+    toggle = "Отключить" if package.enabled else "Включить"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("Изменить объём", callback_data=_wla("pkg_size", package.id))],
+            [_btn("Изменить цену", callback_data=_wla("pkg_price", package.id))],
+            [_btn(toggle, callback_data=_wla("pkg_toggle", package.id), style="primary")],
+            [_btn(texts.BTN_BACK, callback_data=_wla("packages"), icon="back")],
+        ]
+    )
+
+
+def admin_whitelist_rollout_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("Выдать (неоднозначные как оплаченные)",
+                  callback_data=_wla("rollout_all"), style="success")],
+            [_btn("Выдать только однозначным", callback_data=_wla("rollout_strict"),
+                  style="primary")],
+            [_btn(texts.BTN_BACK, callback_data=_wla("home"), icon="back")],
+        ]
+    )
+
+
+def admin_whitelist_user_keyboard(user_id: int, blocked: bool) -> InlineKeyboardMarkup:
+    toggle = (
+        _btn("Разблокировать", callback_data=_wla("unblock", user_id), style="success")
+        if blocked
+        else _btn("Заблокировать", callback_data=_wla("block", user_id), style="danger")
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [toggle],
+            [_btn("Синхронизировать", callback_data=_wla("usersync", user_id))],
         ]
     )
 
@@ -386,6 +533,8 @@ def admin_servers_keyboard(servers: list[Server]) -> InlineKeyboardMarkup:
             mark = "\u26aa"  # ⚪
         state = "вкл" if srv.enabled else "выкл"
         label = f"{mark} #{srv.id} {srv.name} [{state}]"
+        if srv.purpose == SERVER_PURPOSE_WHITELIST:
+            label += " · белые списки"
         rows.append([_btn(label, callback_data=_adm("server", srv.id))])
     rows.append(
         [_btn("Добавить сервер", callback_data=_adm("add"), style="success",

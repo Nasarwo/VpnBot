@@ -22,3 +22,5 @@ class AdminStates(StatesGroup):
     waiting_broadcast = State()
     # Удаление подписки: админ присылает внутренний ID клиента 3x-ui/subId.
     waiting_delete_subscription_client_id = State()
+    # «Обход белых списков»: числовые настройки (объём/цена), контекст в FSM data.
+    waiting_whitelist_value = State()

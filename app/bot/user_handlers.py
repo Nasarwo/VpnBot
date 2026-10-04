@@ -10,7 +10,12 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import keyboards, notify, texts, ui
-from app.bot.callbacks import MenuCallback, OnboardCallback, PlanCallback
+from app.bot.callbacks import (
+    MenuCallback,
+    OnboardCallback,
+    PlanCallback,
+    WhitelistCallback,
+)
 from app.bot.states import OnboardingStates, ProofStates
 from app.config import Settings
 from app.db.enums import AttachmentType, UserRole
@@ -22,7 +27,7 @@ from app.db.repositories import (
     UserRepository,
     VpnClientRepository,
 )
-from app.services import access, audit, billing, bind_requests, payments, plans
+from app.services import access, audit, billing, bind_requests, payments, plans, whitelist
 from app.services.subhub_client import (
     SubHubClient,
     SubHubError,
@@ -45,10 +50,25 @@ def _is_active(client: VpnClient | None) -> bool:
     return access.has_active_timed_client(client)
 
 
-def _welcome_markup(client: VpnClient | None, db_user: User):
+async def _whitelist_visible(
+    session: AsyncSession, db_user: User, client: VpnClient | None
+) -> bool:
+    """Раздел услуги виден при запущенной услуге и подписке или сохранённом остатке."""
+    config = await whitelist.get_config(session)
+    if not config.service_enabled:
+        return False
+    if access.has_client_access(client):
+        return True
+    return await whitelist.get_account(session, db_user.id) is not None
+
+
+async def _welcome_markup(
+    session: AsyncSession, client: VpnClient | None, db_user: User
+):
     return keyboards.welcome_menu(
         access.has_client_access(client),
         is_admin=db_user.role == UserRole.ADMIN,
+        show_whitelist=await _whitelist_visible(session, db_user, client),
     )
 
 
@@ -74,10 +94,12 @@ def _needs_onboarding(db_user: User, client: VpnClient | None) -> bool:
     return client is None
 
 
-async def _send_welcome(message: Message, db_user: User, client: VpnClient | None) -> None:
+async def _send_welcome(
+    message: Message, session: AsyncSession, db_user: User, client: VpnClient | None
+) -> None:
     await message.answer(
         texts.welcome(db_user),
-        reply_markup=_welcome_markup(client, db_user),
+        reply_markup=await _welcome_markup(session, client, db_user),
         parse_mode="HTML",
     )
 
@@ -136,7 +158,7 @@ async def cmd_start(
         )
         return
 
-    await _send_welcome(message, db_user, client)
+    await _send_welcome(message, session, db_user, client)
 
 
 @router.callback_query(OnboardCallback.filter())
@@ -155,7 +177,7 @@ async def onboard_legacy(
         await _edit(
             callback,
             texts.welcome(db_user),
-            _welcome_markup(client, db_user),
+            await _welcome_markup(session, client, db_user),
         )
         await ui.answer_callback(callback)
         return
@@ -249,14 +271,14 @@ async def menu_nav(
     if action == "cancel_payment":
         await _cancel_payment(session, db_user, state)
         await _edit(
-            callback, texts.welcome(db_user), _welcome_markup(client, db_user)
+            callback, texts.welcome(db_user), await _welcome_markup(session, client, db_user)
         )
         await ui.answer_callback(callback, "Заявка отменена")
         return
 
     if action == "home":
         await _edit(
-            callback, texts.welcome(db_user), _welcome_markup(client, db_user)
+            callback, texts.welcome(db_user), await _welcome_markup(session, client, db_user)
         )
     elif action == "admin_panel":
         if not is_admin:
@@ -272,7 +294,9 @@ async def menu_nav(
         await _edit(
             callback,
             texts.subscription_overview(client, db_user.public_id),
-            keyboards.subscription_menu(),
+            keyboards.subscription_menu(
+                show_whitelist=await _whitelist_visible(session, db_user, client)
+            ),
         )
     elif action == "extend":
         last = await PaymentRepository(session).last_successful_for_user(db_user.id)
@@ -410,6 +434,16 @@ async def _reset_bot_user(
             show_alert=True,
         )
         return
+    wl_account = await whitelist.get_account(session, db_user.id)
+    if wl_account is not None and wl_account.paid_bytes > 0:
+        # Сброс удалил бы купленный трафик, который не сгорает.
+        await ui.answer_callback(
+            callback,
+            "У вас есть купленный трафик «Обход белых списков». "
+            "Для сброса обратитесь в поддержку.",
+            show_alert=True,
+        )
+        return
     await state.clear()
     telegram_id = db_user.telegram_id
     username = db_user.username
@@ -488,20 +522,10 @@ async def _cancel_payment(
     session: AsyncSession, db_user: User, state: FSMContext
 ) -> None:
     """Удаляет неподтверждённую заявку (без приложенного скриншота)."""
-    repo = PaymentRepository(session)
-    payment = await repo.latest_open_for_user(db_user.id)
-    if payment is not None:
-        full = await repo.get_by_id_with_relations(payment.id)
-        # Удаляем только заявки без приложенного подтверждения: если скриншот
-        # уже отправлен, заявка ушла на проверку администратору.
-        if full is not None and not full.attachments:
-            logger.info(
-                "Пользователь tg=%s отменил заявку %s",
-                db_user.telegram_id,
-                full.payment_code,
-            )
-            await repo.delete(full)
-            await session.commit()
+    # Если скриншот уже отправлен или админ успел подтвердить заявку, она остаётся.
+    code = await payments.cancel_open_request(session, db_user.id)
+    if code is not None:
+        logger.info("Пользователь tg=%s отменил заявку %s", db_user.telegram_id, code)
     await state.clear()
 
 
@@ -624,3 +648,67 @@ async def proof_text(
         message, session, db_user, settings, state,
         AttachmentType.TEXT, None, message.text,
     )
+
+
+async def _show_whitelist(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    db_user: User,
+    settings: Settings,
+    *,
+    refresh: bool,
+) -> None:
+    updater = build_updater(timeout=min(float(settings.xui_request_timeout), 6.0))
+    overview = await whitelist.user_overview(
+        session, db_user.id, updater if refresh else None
+    )
+    config = await whitelist.get_config(session)
+    await session.commit()
+    await _edit(
+        callback,
+        texts.whitelist_overview(overview, config.paid_free_bytes),
+        keyboards.whitelist_keyboard(overview),
+    )
+
+
+@router.callback_query(WhitelistCallback.filter())
+async def whitelist_menu(
+    callback: CallbackQuery,
+    callback_data: WhitelistCallback,
+    session: AsyncSession,
+    db_user: User,
+    settings: Settings,
+    state: FSMContext,
+) -> None:
+    action = callback_data.action
+    logger.info("Белые списки tg=%s action=%s", db_user.telegram_id, action)
+    if action in ("home", "refresh"):
+        # Отвечаем сразу: сверка с панелью может ждать сетевой таймаут.
+        await ui.answer_callback(callback)
+        await _show_whitelist(callback, session, db_user, settings, refresh=True)
+        return
+    if action == "buy":
+        try:
+            payment = await payments.create_traffic_request(
+                session, db_user.id, callback_data.value
+            )
+        except payments.PendingRequestExists as exc:
+            await ui.answer_callback(
+                callback,
+                f"Заявка {exc.payment.payment_code} уже на проверке. "
+                "Дождитесь решения администратора.",
+                show_alert=True,
+            )
+            return
+        except payments.PaymentRequestError as exc:
+            await ui.answer_callback(callback, str(exc), show_alert=True)
+            return
+        await _edit(
+            callback,
+            texts.payment_created(payment, settings.payment_details_text),
+            keyboards.cancel_payment_keyboard(),
+        )
+        await state.set_state(ProofStates.waiting_proof)
+        await ui.answer_callback(callback)
+        return
+    await ui.answer_callback(callback, "Неизвестное действие", show_alert=True)

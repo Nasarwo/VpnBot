@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
@@ -8,12 +9,14 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -61,6 +64,13 @@ class User(Base, TimestampMixin):
     )
     bind_requests: Mapped[list[BindRequest]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
+    )
+    whitelist_account: Mapped[WhitelistAccount | None] = relationship(
+        cascade="all, delete-orphan", uselist=False
+    )
+    whitelist_ledger: Mapped[list[WhitelistLedger]] = relationship(
+        cascade="all, delete-orphan",
+        foreign_keys="WhitelistLedger.user_id",
     )
 
 
@@ -150,8 +160,23 @@ class VpnClient(Base):
     )
 
 
+SERVER_PURPOSE_STANDARD = "standard"
+SERVER_PURPOSE_WHITELIST = "whitelist"
+
+
 class Server(Base):
     __tablename__ = "servers"
+    __table_args__ = (
+        # Независимые панели не делят одну квоту: активен не более чем один
+        # сервер услуги «Обход белых списков».
+        Index(
+            "uq_servers_single_enabled_whitelist",
+            "purpose",
+            unique=True,
+            sqlite_where=text("purpose = 'whitelist' AND enabled"),
+            postgresql_where=text("purpose = 'whitelist' AND enabled"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -165,6 +190,21 @@ class Server(Base):
     )
     # База ссылки-подписки 3x-ui, напр. https://host:2096/sub/ — полный URL = base + public_id
     subscription_base: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Назначение услуги (не путать с сетевой ролью kind): standard — обычный
+    # безлимитный VPN, whitelist — «Обход белых списков» с учётом трафика.
+    purpose: Mapped[str] = mapped_column(
+        String(16),
+        default=SERVER_PURPOSE_STANDARD,
+        nullable=False,
+        server_default=SERVER_PURPOSE_STANDARD,
+    )
+    # Результат последней сверки inbound'ов (используется для whitelist-сервера):
+    # None — не выполнялась, ready / error / needs_choice.
+    inventory_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    inventory_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    inventory_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # Результат фоновой проверки доступности панели: None — ещё не проверялся.
     is_online: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -245,6 +285,10 @@ class ClientServerMapping(Base):
     server: Mapped[Server] = relationship(back_populates="mappings")
 
 
+PAYMENT_KIND_SUBSCRIPTION = "subscription"
+PAYMENT_KIND_TRAFFIC = "traffic"
+
+
 class PaymentRequest(Base):
     __tablename__ = "payment_requests"
 
@@ -252,9 +296,24 @@ class PaymentRequest(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    amount: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(8), default="RUB", nullable=False)
+    # Для покупки трафика срок не начисляется: period_days = 0.
     period_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    # subscription — продление VPN; traffic — пакет «Обход белых списков».
+    kind: Mapped[str] = mapped_column(
+        String(16),
+        default=PAYMENT_KIND_SUBSCRIPTION,
+        nullable=False,
+        server_default=PAYMENT_KIND_SUBSCRIPTION,
+    )
+    # Снимок пакета на момент создания заявки: объём и название не меняются
+    # при последующем редактировании пакетов администратором.
+    traffic_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    traffic_package_id: Mapped[int | None] = mapped_column(
+        ForeignKey("traffic_packages.id", ondelete="SET NULL"), nullable=True
+    )
+    traffic_package_title: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[PaymentStatus] = mapped_column(
         Enum(PaymentStatus, native_enum=False, length=16),
         default=PaymentStatus.CREATED,
@@ -264,6 +323,10 @@ class PaymentRequest(Base):
     payment_code: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
     admin_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Покупка трафика: версия desired учёта (whitelist_accounts.desired_version), с
+    # которой начисление попадает на панель. NULL — ожидания нет; значение снимается,
+    # когда applied_version достигла её и событие учёта сверено с расходом.
+    apply_pending_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=datetime.utcnow
@@ -371,6 +434,159 @@ class PendingServerUpdate(Base, TimestampMixin):
     vpn_client: Mapped[VpnClient] = relationship()
     server: Mapped[Server] = relationship()
     payment_request: Mapped[PaymentRequest | None] = relationship()
+
+
+class TrafficPackage(Base):
+    """Пакет покупки трафика «Обход белых списков» (настраивается админом)."""
+
+    __tablename__ = "traffic_packages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    traffic_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, server_default=text("true")
+    )
+    sort_order: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, server_default="0"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WhitelistConfig(Base):
+    """Единственная строка настроек услуги (id = 1)."""
+
+    __tablename__ = "whitelist_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Услуга запущена администратором: оплаты и trial начинают выдавать пакеты.
+    service_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default=text("false")
+    )
+    paid_free_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    trial_free_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WhitelistAccount(Base):
+    """Бизнес-учёт трафика пользователя на whitelist-сервере.
+
+    Остатки ``free_bytes``/``paid_bytes`` — подтверждённые: на контрольной точке
+    ``usage_checkpoint_bytes`` (накопленный up+down клиента панели) с учётом всех
+    применённых событий журнала. Неприменённые события (``WhitelistLedger``
+    pending/uncertain) их не меняют. Панели задаётся абсолютная квота
+    ``checkpoint + free + paid`` с предварительно (без расхода) применёнными
+    неприменёнными событиями — гарантированная нижняя граница остатка.
+    ``last_synced_at`` — момент, к которому относятся подтверждённые остатки.
+    """
+
+    __tablename__ = "whitelist_accounts"
+    __table_args__ = (UniqueConstraint("user_id", name="uq_whitelist_accounts_user_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    free_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=0, nullable=False, server_default="0"
+    )
+    paid_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=0, nullable=False, server_default="0"
+    )
+    # Сервер и строка статистики панели, к которым относится контрольная точка.
+    server_id: Mapped[int | None] = mapped_column(
+        ForeignKey("servers.id", ondelete="SET NULL"), nullable=True
+    )
+    # Идентичность клиента на whitelist-панели (совпадает с общей идентичностью
+    # подписки, чтобы SubHub включил конфиг в существующую ссылку).
+    panel_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    usage_checkpoint_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    traffic_row_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Целевое состояние панели: desired_version растёт при каждом изменении
+    # остатков/доступа; applied_version — последнее подтверждённое панелью.
+    desired_version: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=False, server_default="1"
+    )
+    applied_version: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, server_default="0"
+    )
+    applied_total_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    applied_enable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    applied_expiry_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sync_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, server_default="0"
+    )
+    next_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Расхождение счётчика (сброс/пересоздание клиента панели) для администратора.
+    conflict: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Отключение администратором (в боте или вручную на панели) — не снимается
+    # фоновыми повторами и чтением баланса.
+    admin_blocked: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default=text("false")
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+
+    __mapper_args__ = {"version_id_col": version}
+
+
+class WhitelistLedger(Base):
+    """Журнал выдач/начислений/корректировок, привязанных к исходной операции.
+
+    Выдача пакета (``free_set``) и покупка (``paid_delta``) — упорядоченные (по
+    ``id``) события учёта. Событие применяется к подтверждённым остаткам учёта
+    только вместе с расходом до него, поэтому ему нужна привязка к счётчику
+    панели ``anchor_bytes``. Без привязки событие ждёт (``pending``); если
+    сверка не может определить, был расход до или после события, оно остаётся
+    ``uncertain`` с границами ``anchor_min_bytes..anchor_max_bytes`` до решения
+    администратора. ``free/paid_before/after`` у неприменённого события —
+    предварительные (без расхода) и уточняются при применении.
+    """
+
+    __tablename__ = "whitelist_ledger"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # free_grant | purchase | rollout | usage_rebase | adjust
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    # Уникальный ключ исходной операции: payment:12, trial:5, rollout:5 …
+    source_key: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    payment_request_id: Mapped[int | None] = mapped_column(
+        ForeignKey("payment_requests.id", ondelete="SET NULL"), nullable=True
+    )
+    free_before: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    free_after: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    paid_before: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    paid_after: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # settled | pending | uncertain (см. docstring).
+    status: Mapped[str] = mapped_column(
+        String(16), default="settled", nullable=False, server_default="settled"
+    )
+    # Действие события: бесплатный остаток := free_set; купленный += paid_delta.
+    free_set: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    paid_delta: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Значение счётчика up+down панели в момент события (если известно).
+    anchor_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    anchor_min_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    anchor_max_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Время события (для событий учёта задаётся явно, с часовым поясом).
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
 
 
 class AuditLog(Base):

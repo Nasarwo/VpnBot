@@ -5,6 +5,8 @@ import logging
 from app.db.models import ClientServerMapping, Server
 from app.services.panel_updater import (
     PanelUpdateError,
+    QuotaClientState,
+    QuotaTarget,
     ServerProvision,
 )
 from app.services.xui_client import XuiClient, XuiError
@@ -184,6 +186,165 @@ class XuiPanelUpdater:
             )
             await client.add_client(inbound.inbound_id, client_obj)
 
+    # --- Клиент с учётом трафика (whitelist-сервер) -------------------------
+
+    @staticmethod
+    async def _require_clients_api(client: XuiClient, server: Server) -> None:
+        if not await client.supports_clients_api():
+            raise XuiError(
+                f"Панель сервера {server.id} не поддерживает clients API "
+                "(нужна 3x-ui 3.2 или новее): учёт трафика невозможен"
+            )
+
+    @staticmethod
+    async def _read_quota_state(
+        client: XuiClient, email: str
+    ) -> QuotaClientState | None:
+        record = await client.get_client_record(email)
+        if record is None:
+            return None
+        body = client_record_body(record)
+        if body is None:
+            raise XuiError(f"Некорректный ответ панели для клиента {email}")
+        panel_email = str(body.get("email") or email)
+        traffic = await client.get_client_usage(panel_email)
+        used: int | None = None
+        row_id: int | None = None
+        last_online: int | None = None
+        if traffic is not None:
+            used = int(traffic.get("up") or 0) + int(traffic.get("down") or 0)
+            raw_id = traffic.get("id")
+            row_id = raw_id if type(raw_id) is int else None
+            # client_traffics.last_online: панель сдвигает его при каждом
+            # ненулевом приросте up/down (3x-ui >= 3.2). Нет/0 — неизвестно.
+            raw_online = traffic.get("lastOnline")
+            if type(raw_online) is int and raw_online > 0:
+                last_online = raw_online
+        total = body.get("totalGB") or 0
+        expiry = body.get("expiryTime") or 0
+        if type(total) is not int or type(expiry) is not int:
+            raise XuiError(f"Некорректные лимиты клиента {panel_email}")
+        return QuotaClientState(
+            email=panel_email,
+            enable=bool(body.get("enable", True)),
+            total_bytes=total,
+            expiry_ms=expiry,
+            inbound_ids=[
+                int(i) for i in (record.get("inboundIds") or []) if type(i) is int
+            ],
+            used_bytes=used,
+            traffic_row_id=row_id,
+            last_online_ms=last_online,
+        )
+
+    async def read_quota_client(
+        self, server: Server, email: str
+    ) -> QuotaClientState | None:
+        async with self._client(server) as client:
+            try:
+                await self._require_clients_api(client, server)
+                return await self._read_quota_state(client, email)
+            except XuiError as exc:
+                raise PanelUpdateError(str(exc)) from exc
+
+    async def read_quota_clients(
+        self, server: Server, emails: list[str]
+    ) -> dict[str, QuotaClientState | None | PanelUpdateError]:
+        """Сверка расхода пачкой в одной сессии панели (фоновая проверка)."""
+        result: dict[str, QuotaClientState | None | PanelUpdateError] = {}
+        async with self._client(server) as client:
+            try:
+                await self._require_clients_api(client, server)
+            except XuiError as exc:
+                return {email: PanelUpdateError(str(exc)) for email in emails}
+            for email in emails:
+                try:
+                    result[email] = await self._read_quota_state(client, email)
+                except XuiError as exc:
+                    result[email] = PanelUpdateError(str(exc))
+        return result
+
+    async def apply_quota_client(
+        self, server: Server, spec: ServerProvision, target: QuotaTarget
+    ) -> QuotaClientState:
+        """Задаёт абсолютные totalGB/enable/expiry и проверяет их чтением.
+
+        Повтор с тем же ``target`` идемпотентен: квота не прибавляется, а
+        выставляется заново. Секреты, Telegram ID, subId и дополнительные поля
+        существующего клиента сохраняются (read-modify-write).
+        """
+        if target.total_bytes < 0:
+            raise PanelUpdateError("Отрицательная квота трафика")
+        inbound_ids = [i.inbound_id for i in spec.inbounds]
+        flow = next((i.flow for i in spec.inbounds if i.flow), None)
+        async with self._client(server) as client:
+            try:
+                live = {item["id"]: item for item in await client.list_inbounds()}
+                unavailable = [
+                    i for i in inbound_ids
+                    if i not in live or live[i].get("enable") is False
+                ]
+                if not inbound_ids or unavailable:
+                    raise XuiError(
+                        f"Недоступные inbound на сервере {server.id}: {unavailable}. "
+                        "Повторите синхронизацию сервера в админке"
+                    )
+                await self._require_clients_api(client, server)
+                record = await client.get_client_record(spec.email)
+                if record is None:
+                    client_obj = build_client_record(
+                        client_uuid=spec.client_uuid,
+                        password=spec.password,
+                        email=spec.email,
+                        sub_id=spec.sub_id,
+                        expiry_ms=target.expiry_ms,
+                        flow=flow,
+                        total_gb=target.total_bytes,
+                        tg_id=spec.telegram_id or 0,
+                        enable=target.enable,
+                        quota_policy=True,
+                    )
+                    await client.create_client_record(client_obj, inbound_ids)
+                    panel_email = spec.email
+                else:
+                    body = client_record_body(record)
+                    if body is None:
+                        raise XuiError(
+                            f"Некорректный ответ панели для клиента {spec.email}"
+                        )
+                    panel_email = str(body.get("email") or spec.email)
+                    client_obj = merge_client_record_for_update(
+                        body,
+                        email=panel_email,
+                        sub_id=spec.sub_id,
+                        expiry_ms=target.expiry_ms,
+                        enable=target.enable,
+                        flow=flow,
+                        tg_id=spec.telegram_id,
+                        total_bytes=target.total_bytes,
+                        quota_policy=True,
+                    )
+                    current = [
+                        int(i) for i in (record.get("inboundIds") or [])
+                        if type(i) is int and i in live
+                    ]
+                    await client.update_client_record(
+                        panel_email, client_obj,
+                        inbound_ids=sorted(set(current) | set(inbound_ids)),
+                    )
+                    missing = sorted(set(inbound_ids) - set(current))
+                    if missing:
+                        await client.attach_client_record(panel_email, missing)
+                state = await self._read_quota_state(client, panel_email)
+                _verify_quota_state(panel_email, state, target, inbound_ids)
+                assert state is not None
+                return state
+            except XuiError as exc:
+                logger.warning(
+                    "Ошибка применения квоты на сервере %s: %s", server.id, exc
+                )
+                raise PanelUpdateError(str(exc)) from exc
+
     async def update_expiry(
         self, server: Server, mapping: ClientServerMapping, expiry_ms: int
     ) -> None:
@@ -305,6 +466,32 @@ class XuiPanelUpdater:
                 raise last_error or XuiError(
                     f"Не удалось удалить клиента из inbound {inbound_id}"
                 )
+
+
+def _verify_quota_state(
+    email: str,
+    state: QuotaClientState | None,
+    target: QuotaTarget,
+    inbound_ids: list[int],
+) -> None:
+    """Read-after-write: панель должна хранить ровно заданные значения."""
+    if state is None:
+        raise XuiError(f"Панель не подтвердила клиента {email}")
+    problems: list[str] = []
+    if state.total_bytes != target.total_bytes:
+        problems.append(f"totalGB={state.total_bytes}, ожидалось {target.total_bytes}")
+    if state.expiry_ms != target.expiry_ms:
+        problems.append(f"expiryTime={state.expiry_ms}, ожидалось {target.expiry_ms}")
+    if not set(inbound_ids).issubset(state.inbound_ids):
+        problems.append(f"inbound={state.inbound_ids}, ожидалось {inbound_ids}")
+    # Включение подтверждается, если панель не отключила клиента по исчерпанию
+    # квоты в промежутке между записью и чтением.
+    if target.enable and not state.enable and not state.depleted:
+        problems.append("клиент не включён")
+    if not target.enable and state.enable:
+        problems.append("клиент не отключён")
+    if problems:
+        raise XuiError(f"Панель не подтвердила квоту клиента {email}: " + "; ".join(problems))
 
 
 def build_updater(timeout: float = 15.0) -> XuiPanelUpdater:

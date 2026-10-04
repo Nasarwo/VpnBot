@@ -5,7 +5,14 @@ from html import escape
 
 from app.bot import emoji
 from app.db.enums import PaymentStatus
-from app.db.models import PaymentRequest, Server, User, VpnClient
+from app.db.models import (
+    PAYMENT_KIND_TRAFFIC,
+    SERVER_PURPOSE_WHITELIST,
+    PaymentRequest,
+    Server,
+    User,
+    VpnClient,
+)
 
 # Кнопки пользовательского меню (inline)
 BTN_MY_SUBSCRIPTION = "Моя подписка"
@@ -28,6 +35,8 @@ BTN_GUIDE_ANDROID_IOS = "Android & IOS"
 BTN_PROXY_MTPROTO = "MTProto 1"
 BTN_PROXY_MTPROTO_2 = "MTProto 2"
 BTN_NEWS = "Новостной канал"
+BTN_WHITELIST = "Обход белых списков"
+BTN_WHITELIST_REFRESH = "Обновить остаток"
 
 INSTALL_GUIDE_WINDOWS_URL = (
     "https://telegra.ph/Gajd-po-podklyucheniyu-Windows--07062026-06-07"
@@ -317,6 +326,32 @@ def connection_unavailable() -> str:
     )
 
 
+def fmt_gb(size_bytes: int | None) -> str:
+    """Объём в ГБ (1 ГБ = 1024³ байт), как его показывает панель."""
+    from decimal import ROUND_DOWN, Decimal
+
+    value = (Decimal(max(0, size_bytes or 0)) / Decimal(1024**3)).quantize(
+        Decimal("0.01"), rounding=ROUND_DOWN
+    )
+    text = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{text.replace('.', ',')} ГБ"
+
+
+def fmt_money(amount: object) -> str:
+    from decimal import Decimal
+
+    value = Decimal(str(amount))
+    if value == value.to_integral_value():
+        return f"{int(value)} ₽"
+    return f"{value:.2f} ₽".replace(".", ",")
+
+
+def payment_subject(payment: PaymentRequest) -> str:
+    if payment.kind == PAYMENT_KIND_TRAFFIC:
+        return f"Трафик «{BTN_WHITELIST}»: {fmt_gb(payment.traffic_bytes)}"
+    return f"Срок: {period_label(payment.period_days)}"
+
+
 def period_label(period_days: int) -> str:
     from app.services.plans import PLANS
 
@@ -329,11 +364,10 @@ def period_label(period_days: int) -> str:
 def payment_created(
     payment: PaymentRequest, details_text: str
 ) -> str:
-    amount = int(payment.amount) if payment.amount == int(payment.amount) else payment.amount
     return (
         f"Заявка <code>{escape(payment.payment_code)}</code> создана.\n\n"
-        f"Сумма: {amount} ₽\n"
-        f"Срок: {period_label(payment.period_days)}\n\n"
+        f"Сумма: {fmt_money(payment.amount)}\n"
+        f"{escape(payment_subject(payment))}\n\n"
         "Переведите оплату по реквизитам:\n"
         f"{details_text}\n\n"
         "После оплаты отправьте сюда чек, скриншот или сообщение об оплате."
@@ -461,20 +495,31 @@ def payment_rejected(payment_code: str) -> str:
 # --- Админские тексты ---
 
 
+def payment_status_label(payment: PaymentRequest) -> str:
+    if payment.kind == PAYMENT_KIND_TRAFFIC and payment.status == PaymentStatus.APPLIED:
+        if payment.apply_pending_version is not None:
+            return "трафик начислен, ожидается применение на сервере"
+        return "трафик начислен"
+    if payment.status == PaymentStatus.APPLIED and payment.last_error:
+        return "оплата учтена, ожидается синхронизация серверов"
+    return STATUS_LABELS.get(payment.status, payment.status.value)
+
+
 def admin_payment_card(payment: PaymentRequest, user: User) -> str:
     username = f"@{escape(user.username)}" if user.username else "—"
-    amount = int(payment.amount) if payment.amount == int(payment.amount) else payment.amount
-    status = escape(STATUS_LABELS.get(payment.status, payment.status.value))
+    status = escape(payment_status_label(payment))
     pid = f"<code>{escape(user.public_id)}</code>" if user.public_id else "—"
-    if payment.status == PaymentStatus.APPLIED and payment.last_error:
-        status = "оплата учтена, ожидается синхронизация серверов"
+    if payment.kind == PAYMENT_KIND_TRAFFIC:
+        subject = f"Покупка трафика «{BTN_WHITELIST}»: {fmt_gb(payment.traffic_bytes)}"
+    else:
+        subject = f"Срок: +{payment.period_days} дней"
     text = (
         f"Новая заявка <code>{escape(payment.payment_code)}</code>\n\n"
         f"Пользователь: {username}\n"
         f"ID: {pid}\n"
         f"Telegram ID: {user.telegram_id}\n"
-        f"Сумма: {amount} ₽\n"
-        f"Срок: +{payment.period_days} дней\n"
+        f"Сумма: {fmt_money(payment.amount)}\n"
+        f"{escape(subject)}\n"
         f"Статус: {status}"
     )
     if payment.last_error:
@@ -505,9 +550,10 @@ def admin_history(payments: list[PaymentRequest]) -> str:
         return "История оплат пуста."
     lines = ["История оплат:\n"]
     for p in payments:
-        status = escape(STATUS_LABELS.get(p.status, p.status.value))
+        status = escape(payment_status_label(p))
+        kind = f" — трафик {fmt_gb(p.traffic_bytes)}" if p.kind == PAYMENT_KIND_TRAFFIC else ""
         lines.append(
-            f"<code>{escape(p.payment_code)}</code> — {int(p.amount)} ₽ — "
+            f"<code>{escape(p.payment_code)}</code> — {fmt_money(p.amount)}{kind} — "
             f"{status} — {_fmt_date(p.created_at)}"
         )
     return "\n".join(lines)
@@ -520,10 +566,13 @@ def admin_pending(payments: list[PaymentRequest]) -> str:
     for p in payments:
         user = p.user
         username = f"@{escape(user.username)}" if user and user.username else "—"
-        amount = int(p.amount) if p.amount == int(p.amount) else p.amount
+        subject = (
+            f"трафик {fmt_gb(p.traffic_bytes)}"
+            if p.kind == PAYMENT_KIND_TRAFFIC else f"+{p.period_days} дн."
+        )
         lines.append(
             f"<code>{escape(p.payment_code)}</code> — {username} — "
-            f"{amount} ₽ — +{p.period_days} дн."
+            f"{fmt_money(p.amount)} — {subject}"
         )
     lines.append("\nПодтвердить: /confirm КОД\nОтклонить: /reject КОД")
     return "\n".join(lines)
@@ -668,6 +717,19 @@ def admin_servers_title(servers: list) -> str:
     )
 
 
+_INVENTORY_LABELS = {
+    "ready": "готов к выдаче",
+    "error": "ошибка синхронизации",
+    "needs_choice": "нужно выбрать целевой inbound",
+}
+
+
+def server_purpose_label(server) -> str:
+    if getattr(server, "purpose", None) == SERVER_PURPOSE_WHITELIST:
+        return BTN_WHITELIST
+    return "Обычный VPN"
+
+
 def admin_server_detail(server) -> str:
     inbounds = list(getattr(server, "inbounds", []))
     enabled_inbounds = sum(1 for i in inbounds if i.enabled)
@@ -687,6 +749,7 @@ def admin_server_detail(server) -> str:
         "",
         f"Состояние: {'включён' if server.enabled else 'выключен'}",
         f"Доступность: {online} (проверка: {last})",
+        f"Услуга: {server_purpose_label(server)}",
         f"Тип: {server.kind}",
         f"Страна: {server.country or '—'}",
         f"Панель: {server.panel_url}",
@@ -697,6 +760,11 @@ def admin_server_detail(server) -> str:
         flow = f", flow={inb.flow}" if inb.flow else ""
         on = "" if inb.enabled else " (выкл)"
         lines.append(f"   • inbound {inb.inbound_id}: {inb.protocol.value}{flow}{on}")
+    if getattr(server, "purpose", None) == SERVER_PURPOSE_WHITELIST:
+        status = _INVENTORY_LABELS.get(server.inventory_status or "", "не синхронизирован")
+        lines.append(f"Готовность услуги: {status}")
+        if server.inventory_error:
+            lines.append(f"Сверка: {server.inventory_error}")
     return "\n".join(lines)
 
 
@@ -889,4 +957,343 @@ def admin_clients_list(title: str, clients: list[VpnClient]) -> str:
         username = f"@{user.username}" if user and user.username else "—"
         tg_id = user.telegram_id if user else "?"
         lines.append(f"{username} (TG {tg_id}) — до {_fmt_date(c.expires_at)}")
+    return "\n".join(lines)
+
+
+# --- «Обход белых списков» -----------------------------------------------------
+
+_WL_STATUS = {
+    "not_launched": "услуга ещё не запущена",
+    "no_access": "нужна активная подписка",
+    "expired": "подписка истекла — конфиг остановлен",
+    "lifetime": "работает, трафик без ограничений",
+    "active": "работает",
+    "exhausted": "трафик закончился — конфиг остановлен",
+    "blocked": "отключён администратором",
+}
+
+
+def whitelist_overview(ov, paid_free_bytes: int) -> str:
+    """Раздел услуги для пользователя. parse_mode='HTML'."""
+    lines = [
+        f"{emoji.tg('connect')} <b>{BTN_WHITELIST}</b>",
+        "",
+        f"Статус: {_WL_STATUS.get(ov.status, ov.status)}",
+    ]
+    if ov.status == "not_launched":
+        lines.extend([
+            "",
+            "Отдельный конфиг для работы при ограничениях по белым спискам "
+            "скоро появится в вашей подписке.",
+        ])
+        return "\n".join(lines)
+    if ov.status == "lifetime":
+        lines.append("Подписка VPN: бессрочная")
+    elif ov.expires_at is not None:
+        lines.append(f"Подписка VPN: до {_fmt_date(ov.expires_at)}")
+    if ov.status != "lifetime":
+        lines.extend([
+            "",
+            f"Бесплатный остаток: <b>{fmt_gb(ov.free_bytes)}</b>",
+            f"Купленный остаток: <b>{fmt_gb(ov.paid_bytes)}</b>",
+            "",
+            "Сначала расходуется бесплатный трафик, затем купленный. "
+            f"Каждая оплата подписки восстанавливает бесплатный остаток до "
+            f"{fmt_gb(paid_free_bytes)}. Купленный трафик не сгорает.",
+        ])
+    if ov.status in ("expired", "no_access"):
+        lines.extend([
+            "",
+            "Пока подписка не активна, конфиг не работает, даже если трафик "
+            "остался. Сохранённый остаток станет доступен после продления.",
+        ])
+    elif ov.status == "exhausted":
+        lines.extend([
+            "",
+            "Обычные конфиги подписки продолжают работать. Чтобы возобновить "
+            "этот конфиг, купите пакет или дождитесь следующей оплаты подписки.",
+        ])
+    elif ov.status == "blocked":
+        lines.extend(["", "По вопросам обратитесь в поддержку."])
+    when = _fmt_date(ov.last_synced_at) if ov.last_synced_at else "—"
+    if ov.awaiting and ov.status != "lifetime":
+        lines.extend(["", f"{emoji.tg('unknown')} Остатки показаны на {when} и ещё не учитывают:"])
+        for credit in ov.awaiting:
+            if credit.free_set is not None:
+                lines.append(
+                    f"• бесплатный остаток будет восстановлен до {fmt_gb(credit.free_set)}"
+                )
+            if credit.paid_delta is not None:
+                lines.append(f"• купленный трафик +{fmt_gb(credit.paid_delta)}")
+        if ov.uncertain:
+            tail = "Расход за время, когда сервер не отвечал, уточняет администратор."
+        elif ov.stale:
+            tail = "Сервер временно не отвечает — остатки пересчитаются после сверки расхода."
+        else:
+            tail = "Остатки пересчитаются после сверки расхода с сервером."
+        lines.append(f"Оплата сохранена. {tail}")
+    elif ov.stale:
+        lines.extend([
+            "",
+            f"{emoji.tg('unknown')} Сервер временно не отвечает: показан последний "
+            f"подтверждённый остаток (сверка: {when}).",
+        ])
+    if ov.pending:
+        lines.extend([
+            "",
+            "Изменения применяются на сервере — обычно это занимает несколько минут.",
+        ])
+    if ov.status in ("active", "lifetime", "exhausted"):
+        lines.extend([
+            "",
+            f"Конфиг «{BTN_WHITELIST}» входит в вашу обычную ссылку подписки "
+            "(«Подключение»). Отдельная ссылка не нужна.",
+        ])
+    if ov.can_buy and ov.packages:
+        lines.extend(["", "Пакеты трафика:"])
+        for package in ov.packages:
+            lines.append(f"• {fmt_gb(package.traffic_bytes)} — {fmt_money(package.price)}")
+    return "\n".join(lines)
+
+
+def whitelist_package_button(package) -> str:
+    return f"{fmt_gb(package.traffic_bytes)} — {fmt_money(package.price)}"
+
+
+def traffic_credited(size_bytes: int | None, pending: bool) -> str:
+    text = (
+        f"{emoji.tg('ok')} Оплата подтверждена. Начислено "
+        f"{fmt_gb(size_bytes)} трафика «{BTN_WHITELIST}».\n"
+        "Срок подписки не меняется, купленный трафик не сгорает."
+    )
+    if pending:
+        text += (
+            "\n\nПрименение на сервере ещё выполняется. Повторно оплачивать не нужно."
+        )
+    return text
+
+
+def traffic_credited_expired(size_bytes: int | None) -> str:
+    return (
+        f"{emoji.tg('ok')} Оплата подтверждена. Начислено {fmt_gb(size_bytes)} "
+        f"трафика «{BTN_WHITELIST}».\n\n"
+        "Подписка сейчас не активна, поэтому конфиг остановлен. Трафик сохранён и "
+        "станет доступен после продления подписки."
+    )
+
+
+def whitelist_pending_note() -> str:
+    return (
+        f"\n\nКонфиг «{BTN_WHITELIST}» обновится на сервере в течение нескольких "
+        "минут."
+    )
+
+
+def _fmt_span(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 90:
+        return f"{seconds} с"
+    if seconds < 5400:
+        return f"{round(seconds / 60)} мин"
+    return f"{seconds / 3600:.1f} ч".replace(".", ",")
+
+
+def reconcile_status_lines(status, now: datetime | None = None) -> list[str]:
+    """Состояние фоновой сверки расхода для админ-раздела (по данным процесса)."""
+    now = now or datetime.now(UTC)
+    report = status.last_report
+    lines: list[str] = []
+    if status.last_success_at is None:
+        lines.append("Сверка расхода: чистый обход с запуска бота ещё не завершён")
+    else:
+        age = _fmt_span(status.success_age(now).total_seconds())
+        worst = _fmt_span(status.worst_case_staleness(now).total_seconds())
+        lines.append(
+            f"Сверка расхода: последний обход без ошибок завершён {age} назад "
+            f"(данные учёта не старше {worst})"
+        )
+    if report is not None:
+        lines.append(
+            f"  последний обход: {_fmt_span(report.active_seconds)}, пачек {report.batches}, "
+            f"сверено {report.reconciled}, пропущено {report.skipped}, "
+            f"ошибок {report.errors}"
+        )
+    current = status.current
+    if current is not None and current.aborted:
+        lines.append(
+            f"  обход прерван ({current.aborted}), впереди учётов: {current.remaining}"
+        )
+    return lines
+
+
+def admin_whitelist_home(config, server, summary, packages) -> str:
+    lines = [f"Услуга «{BTN_WHITELIST}»", ""]
+    lines.append(f"Услуга: {'запущена' if config.service_enabled else 'не запущена'}")
+    if server is None:
+        lines.append("Сервер: не добавлен (Серверы → Добавить → «Обход белых списков»)")
+    else:
+        status = _INVENTORY_LABELS.get(server.inventory_status or "", "не синхронизирован")
+        online = {True: "онлайн", False: "офлайн"}.get(server.is_online, "не проверялся")
+        lines.append(f"Сервер: #{server.id} {server.name} — {status}, {online}")
+        targets = [i for i in server.inbounds if i.enabled]
+        if len(targets) == 1:
+            remark = f" «{targets[0].remark}»" if targets[0].remark else ""
+            lines.append(
+                f"Целевой inbound: {targets[0].inbound_id} "
+                f"({targets[0].protocol.value}){remark}"
+            )
+        if server.inventory_error:
+            lines.append(f"Сверка: {server.inventory_error}")
+    lines.extend([
+        "",
+        f"Бесплатно за оплату подписки: {fmt_gb(config.paid_free_bytes)}",
+        f"Бесплатно за пробный период: {fmt_gb(config.trial_free_bytes)}",
+        "",
+        "Пакеты покупки:",
+    ])
+    if not packages:
+        lines.append("  нет")
+    for package in packages:
+        state = "" if package.enabled else " (отключён)"
+        lines.append(
+            f"  #{package.id}: {fmt_gb(package.traffic_bytes)} — "
+            f"{fmt_money(package.price)}{state}"
+        )
+    lines.extend([
+        "",
+        f"Учётов: {summary.accounts}; ожидают применения: {summary.pending}; "
+        f"ошибок: {summary.errors}; расхождений: {summary.conflicts}; "
+        f"заблокировано: {summary.blocked}",
+        f"Начисления ждут сверки расхода: {summary.unsettled}; "
+        f"требуют решения: {summary.uncertain}",
+    ])
+    if summary.reconcile is not None:
+        lines.extend(reconcile_status_lines(summary.reconcile))
+    lines.append("Пользователь: /wl <telegram_id>")
+    return "\n".join(lines)
+
+
+def admin_whitelist_inventory(result) -> str:
+    labels = {
+        "ready": "Сервер готов к выдаче конфигов.",
+        "error": "Сервер не готов: синхронизация не удалась.",
+        "needs_choice": "Сервер не готов: выберите единственный целевой inbound.",
+    }
+    lines = [labels.get(result.status, result.status)]
+    if result.error:
+        lines.append(result.error)
+    return "\n".join(lines)
+
+
+def admin_whitelist_rollout_plan(plan, config) -> str:
+    counts = plan.counts
+    lines = [
+        f"Выдача услуги «{BTN_WHITELIST}» нынешним пользователям",
+        "",
+        f"Оплаченная подписка: {counts.get('paid', 0)} → {fmt_gb(config.paid_free_bytes)}",
+        f"Пробный период: {counts.get('trial', 0)} → {fmt_gb(config.trial_free_bytes)}",
+        f"Бессрочный доступ: {counts.get('lifetime', 0)} → без ограничений",
+        f"Неоднозначные: {counts.get('ambiguous', 0)} (нет оплаты, покрывающей "
+        "текущий срок, и нет следа пробного периода — например, привязка или "
+        "ручное продление)",
+        f"Уже получили пакет: {plan.already_served} (повторно не выдаётся)",
+    ]
+    if plan.ambiguous_users:
+        lines.append("")
+        lines.append("Неоднозначные (TG / ID / срок):")
+        for telegram_id, public_id, expires in plan.ambiguous_users[:20]:
+            lines.append(f"  {telegram_id} / {public_id or '—'} / {_fmt_date(expires)}")
+        if len(plan.ambiguous_users) > 20:
+            lines.append(f"  …и ещё {len(plan.ambiguous_users) - 20}")
+    lines.extend([
+        "",
+        "Повторный запуск безопасен: второй начальный пакет не выдаётся, купленный "
+        "остаток не меняется. Применение на сервере идёт в фоне.",
+    ])
+    return "\n".join(lines)
+
+
+def admin_whitelist_rollout_report(report) -> str:
+    granted = report.granted
+    return (
+        "Выдача выполнена.\n"
+        f"Оплаченные: {granted.get('paid', 0)}, пробные: {granted.get('trial', 0)}, "
+        f"неоднозначные (как оплаченные): {granted.get('ambiguous', 0)}\n"
+        f"Бессрочные: {report.lifetime}\n"
+        f"Уже имели пакет: {report.skipped_existing}\n"
+        f"Неоднозначные пропущены: {report.skipped_ambiguous}\n\n"
+        "Конфиги создаются на сервере в фоне; прогресс — «ожидают применения»."
+    )
+
+
+def admin_whitelist_packages(packages) -> str:
+    if not packages:
+        return "Пакетов нет. Добавьте первый."
+    lines = ["Пакеты покупки трафика (созданные заявки хранят свою цену и объём):", ""]
+    for package in packages:
+        state = "включён" if package.enabled else "отключён"
+        lines.append(
+            f"#{package.id}: {fmt_gb(package.traffic_bytes)} — "
+            f"{fmt_money(package.price)} — {state}"
+        )
+    return "\n".join(lines)
+
+
+def _wl_event_label(event) -> str:
+    parts = []
+    if event.free_set is not None:
+        parts.append(f"бесплатный := {fmt_gb(event.free_set)}")
+    if event.paid_delta is not None:
+        parts.append(f"купленный +{fmt_gb(event.paid_delta)}")
+    state = {"pending": "ждёт сверки", "uncertain": "нужно решение"}.get(
+        event.status, event.status
+    )
+    note = f" — {event.note}" if event.note else ""
+    return f"  #{event.id} {_fmt_date(event.created_at)}: {', '.join(parts)} [{state}]{note}"
+
+
+def admin_whitelist_user(user, account, overview, events=(), outcomes=None) -> str:
+    lines = [
+        f"«{BTN_WHITELIST}»: {user.public_id or '—'} (TG {user.telegram_id})",
+        f"Статус: {_WL_STATUS.get(overview.status, overview.status)}",
+    ]
+    if account is None:
+        lines.append("Учёта нет (пакеты не выдавались).")
+        return "\n".join(lines)
+    lines.extend([
+        f"Бесплатный: {fmt_gb(account.free_bytes)} ({account.free_bytes} байт)",
+        f"Купленный: {fmt_gb(account.paid_bytes)} ({account.paid_bytes} байт)",
+        f"Счётчик панели на сверке: {account.usage_checkpoint_bytes}",
+        f"Последняя сверка: {_fmt_date(account.last_synced_at)}",
+        f"Применено на панели: totalGB={account.applied_total_bytes}, "
+        f"enable={account.applied_enable}, версия {account.applied_version}/"
+        f"{account.desired_version}",
+        f"Заблокирован админом: {'да' if account.admin_blocked else 'нет'}",
+    ])
+    if account.last_error:
+        lines.append(f"Ошибка применения: {account.last_error}")
+    if account.conflict:
+        lines.append(f"Расхождение: {account.conflict}")
+    if events:
+        lines.append("Начисления, не применённые к остаткам выше (по порядку):")
+        lines.extend(_wl_event_label(event) for event in events)
+    uncertain = next((e for e in events if e.status == "uncertain"), None)
+    if uncertain is not None:
+        tg = user.telegram_id
+        if outcomes is not None:
+            (free_b, paid_b), (free_a, paid_a) = outcomes
+            span = (uncertain.anchor_max_bytes or 0) - (uncertain.anchor_min_bytes or 0)
+            lines.extend([
+                f"Расход {fmt_gb(span)} нельзя автоматически отнести до или после "
+                f"начисления #{uncertain.id}. Варианты на конец этого периода:",
+                f"  до: бесплатный {fmt_gb(free_b)}, купленный {fmt_gb(paid_b)}",
+                f"  после: бесплатный {fmt_gb(free_a)}, купленный {fmt_gb(paid_a)}",
+                f"Решение: /wlresolve {tg} до|после <причина> или "
+                f"/wladjust {tg} <бесплатно ГБ> <куплено ГБ> <причина>",
+            ])
+        else:
+            lines.append(
+                f"Расход до начисления #{uncertain.id} не прочитан с сервера. Задайте "
+                f"остатки: /wladjust {tg} <бесплатно ГБ> <куплено ГБ> <причина>"
+            )
     return "\n".join(lines)
