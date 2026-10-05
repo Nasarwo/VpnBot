@@ -16,6 +16,7 @@ from app.services import billing, payments, provisioning, whitelist
 from app.services.panel_updater import MockPanelUpdater
 from tests.test_admin_confirm import FakeBot
 from tests.test_whitelist import EMAIL, _Panel, service_on, wl_server  # noqa: F401
+from tests.whitelist_inbounds import vless_reality
 
 GIB = whitelist.GIB
 
@@ -166,8 +167,7 @@ async def test_admin_adds_whitelist_server_with_automatic_inventory(
 ):
     monkeypatch.setattr(
         provisioning, "XuiClient",
-        lambda **_: _Panel([{"id": 12, "protocol": "vless", "enable": True,
-                             "remark": "Обход белых списков"}]),
+        lambda **_: _Panel([vless_reality(12)]),
     )
     state = FakeState()
     callback = FakeCallback()
@@ -209,7 +209,7 @@ async def test_admin_failed_first_sync_is_visible_and_retryable(
 
     monkeypatch.setattr(
         provisioning, "XuiClient",
-        lambda **_: _Panel([{"id": 12, "protocol": "vless", "enable": True}]),
+        lambda **_: _Panel([vless_reality(12)]),
     )
     from app.bot.callbacks import WhitelistAdminCallback
 

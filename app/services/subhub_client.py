@@ -4,10 +4,13 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import logging
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class SubHubError(Exception):
@@ -92,7 +95,8 @@ class SubHubClient:
         payload = {"email": email} if email is not None else {"token": token}
         try:
             response = await self._client.post("admin/subscriptions/resolve", json=payload)
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except httpx.TransportError as exc:
+            # Таймаут, сеть, разрыв без ответа (например, при перезапуске SubHub).
             raise SubHubError("SubHub is temporarily unavailable") from exc
         if response.status_code == 404:
             raise SubHubNotFound("subscription was not found")
@@ -128,8 +132,10 @@ class SubHubClient:
     async def trigger_sync(self) -> None:
         try:
             response = await self._client.post("admin/sync")
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except httpx.TransportError as exc:
             raise SubHubError("SubHub is temporarily unavailable") from exc
+        # 409 отдаёт SubHub без повтора проходов («синхронизация уже идёт»): изменение
+        # дойдёт только с резервным опросом. Исправленный SubHub отвечает 202 «queued».
         if response.status_code in {202, 409}:
             return
         if response.status_code in {401, 403}:
@@ -203,6 +209,8 @@ async def trigger_configured_sync(
     try:
         async with SubHubClient(base_url, admin_token, timeout=timeout) as client:
             await client.trigger_sync()
-    except (SubHubError, ValueError):
+    except (SubHubError, ValueError) as exc:
+        # Изменение дойдёт до подписки с резервным опросом SubHub.
+        logger.warning("SubHub: синхронизация не запрошена: %s", exc)
         return False
     return True

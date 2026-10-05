@@ -26,6 +26,7 @@ from app.db.repositories import ServerRepository
 from app.services import billing, payments, provisioning, whitelist
 from app.services.access import resolve_effective_role
 from app.services.panel_updater import MockPanelUpdater, QuotaClientState
+from tests.whitelist_inbounds import vless_reality
 
 GIB = whitelist.GIB
 EMAIL = "test@local"  # идентичность mapping'а из фикстуры vpn_client
@@ -539,10 +540,7 @@ async def test_first_import_failure_then_retry_and_single_target(session, monkey
     assert result.status == "error" and not whitelist.server_ready(server)
     assert await whitelist.process_due(session, panel) == 0
 
-    two = [
-        {"id": 3, "protocol": "vless", "enable": True, "remark": "A"},
-        {"id": 4, "protocol": "trojan", "enable": True, "remark": "B"},
-    ]
+    two = [vless_reality(3, remark="A"), vless_reality(4, remark="B")]
     monkeypatch.setattr(provisioning, "XuiClient", lambda **_: _Panel(two))
     result = await whitelist.sync_inventory(session, server)
     await session.commit()
@@ -552,7 +550,7 @@ async def test_first_import_failure_then_retry_and_single_target(session, monkey
     server = await whitelist.get_active_server(session)
     assert whitelist.server_ready(server) and whitelist.target_inbound(server).inbound_id == 4
 
-    three = [*two, {"id": 5, "protocol": "vless", "enable": True}]
+    three = [*two, vless_reality(5)]
     monkeypatch.setattr(provisioning, "XuiClient", lambda **_: _Panel(three))
     for _ in range(2):  # повтор идемпотентен
         result = await whitelist.sync_inventory(session, server)

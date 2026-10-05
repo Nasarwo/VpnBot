@@ -79,6 +79,9 @@ async def create_request(
     existing, has_proof = await _open_request_for_update(session, user_id)
     if existing is not None:
         if has_proof:
+            if existing.kind != PAYMENT_KIND_SUBSCRIPTION:
+                # Квитанция уже относится к другому виду оплаты: заявку не трогаем.
+                raise PendingRequestExists(existing)
             return existing
         changed = False
         if existing.kind != PAYMENT_KIND_SUBSCRIPTION:
@@ -220,9 +223,7 @@ async def create_traffic_request(
 
 
 def whitelist_package_title(package: TrafficPackage) -> str:
-    size = Decimal(package.traffic_bytes) / whitelist.GIB
-    text = f"{size:.2f}".rstrip("0").rstrip(".")
-    return f"{text} ГБ"
+    return f"{whitelist.set_volume_gib_text(package.traffic_bytes)} ГБ"
 
 
 @serialized_access("user_id", "user")

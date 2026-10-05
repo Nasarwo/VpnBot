@@ -326,8 +326,18 @@ def connection_unavailable() -> str:
     )
 
 
+def fmt_gb_set(size_bytes: int | None) -> str:
+    """Заданный объём (пакет, начисление, бесплатный пакет): как его ввёл администратор.
+
+    Для остатков не использовать — их показывает `fmt_gb` (с округлением вниз).
+    """
+    from app.services.whitelist import set_volume_gib_text
+
+    return f"{set_volume_gib_text(size_bytes).replace('.', ',')} ГБ"
+
+
 def fmt_gb(size_bytes: int | None) -> str:
-    """Объём в ГБ (1 ГБ = 1024³ байт), как его показывает панель."""
+    """Остаток или расход в ГБ (1 ГБ = 1024³ байт), округлённый вниз: лишнего не обещаем."""
     from decimal import ROUND_DOWN, Decimal
 
     value = (Decimal(max(0, size_bytes or 0)) / Decimal(1024**3)).quantize(
@@ -348,7 +358,7 @@ def fmt_money(amount: object) -> str:
 
 def payment_subject(payment: PaymentRequest) -> str:
     if payment.kind == PAYMENT_KIND_TRAFFIC:
-        return f"Трафик «{BTN_WHITELIST}»: {fmt_gb(payment.traffic_bytes)}"
+        return f"Трафик «{BTN_WHITELIST}»: {fmt_gb_set(payment.traffic_bytes)}"
     return f"Срок: {period_label(payment.period_days)}"
 
 
@@ -359,6 +369,19 @@ def period_label(period_days: int) -> str:
         if plan.period_days == period_days:
             return f"{period_days} дней ({plan.title})"
     return f"{period_days} дней"
+
+
+def payment_pending_review(payment: PaymentRequest) -> str:
+    """Отказ создать новую заявку: прежняя с квитанцией ждёт проверки."""
+    purpose = (
+        f"покупка трафика, {fmt_gb_set(payment.traffic_bytes)}"
+        if payment.kind == PAYMENT_KIND_TRAFFIC
+        else f"продление подписки, {period_label(payment.period_days)}"
+    )
+    return (
+        f"Заявка {payment.payment_code} ({purpose}) уже на проверке. "
+        "Дождитесь решения администратора."
+    )
 
 
 def payment_created(
@@ -510,7 +533,7 @@ def admin_payment_card(payment: PaymentRequest, user: User) -> str:
     status = escape(payment_status_label(payment))
     pid = f"<code>{escape(user.public_id)}</code>" if user.public_id else "—"
     if payment.kind == PAYMENT_KIND_TRAFFIC:
-        subject = f"Покупка трафика «{BTN_WHITELIST}»: {fmt_gb(payment.traffic_bytes)}"
+        subject = f"Покупка трафика «{BTN_WHITELIST}»: {fmt_gb_set(payment.traffic_bytes)}"
     else:
         subject = f"Срок: +{payment.period_days} дней"
     text = (
@@ -551,7 +574,7 @@ def admin_history(payments: list[PaymentRequest]) -> str:
     lines = ["История оплат:\n"]
     for p in payments:
         status = escape(payment_status_label(p))
-        kind = f" — трафик {fmt_gb(p.traffic_bytes)}" if p.kind == PAYMENT_KIND_TRAFFIC else ""
+        kind = f" — трафик {fmt_gb_set(p.traffic_bytes)}" if p.kind == PAYMENT_KIND_TRAFFIC else ""
         lines.append(
             f"<code>{escape(p.payment_code)}</code> — {fmt_money(p.amount)}{kind} — "
             f"{status} — {_fmt_date(p.created_at)}"
@@ -567,7 +590,7 @@ def admin_pending(payments: list[PaymentRequest]) -> str:
         user = p.user
         username = f"@{escape(user.username)}" if user and user.username else "—"
         subject = (
-            f"трафик {fmt_gb(p.traffic_bytes)}"
+            f"трафик {fmt_gb_set(p.traffic_bytes)}"
             if p.kind == PAYMENT_KIND_TRAFFIC else f"+{p.period_days} дн."
         )
         lines.append(
@@ -721,6 +744,7 @@ _INVENTORY_LABELS = {
     "ready": "готов к выдаче",
     "error": "ошибка синхронизации",
     "needs_choice": "нужно выбрать целевой inbound",
+    "incompatible": "целевой inbound несовместим с SubHub",
 }
 
 
@@ -999,7 +1023,7 @@ def whitelist_overview(ov, paid_free_bytes: int) -> str:
             "",
             "Сначала расходуется бесплатный трафик, затем купленный. "
             f"Каждая оплата подписки восстанавливает бесплатный остаток до "
-            f"{fmt_gb(paid_free_bytes)}. Купленный трафик не сгорает.",
+            f"{fmt_gb_set(paid_free_bytes)}. Купленный трафик не сгорает.",
         ])
     if ov.status in ("expired", "no_access"):
         lines.extend([
@@ -1021,10 +1045,10 @@ def whitelist_overview(ov, paid_free_bytes: int) -> str:
         for credit in ov.awaiting:
             if credit.free_set is not None:
                 lines.append(
-                    f"• бесплатный остаток будет восстановлен до {fmt_gb(credit.free_set)}"
+                    f"• бесплатный остаток будет восстановлен до {fmt_gb_set(credit.free_set)}"
                 )
             if credit.paid_delta is not None:
-                lines.append(f"• купленный трафик +{fmt_gb(credit.paid_delta)}")
+                lines.append(f"• купленный трафик +{fmt_gb_set(credit.paid_delta)}")
         if ov.uncertain:
             tail = "Расход за время, когда сервер не отвечал, уточняет администратор."
         elif ov.stale:
@@ -1052,18 +1076,18 @@ def whitelist_overview(ov, paid_free_bytes: int) -> str:
     if ov.can_buy and ov.packages:
         lines.extend(["", "Пакеты трафика:"])
         for package in ov.packages:
-            lines.append(f"• {fmt_gb(package.traffic_bytes)} — {fmt_money(package.price)}")
+            lines.append(f"• {fmt_gb_set(package.traffic_bytes)} — {fmt_money(package.price)}")
     return "\n".join(lines)
 
 
 def whitelist_package_button(package) -> str:
-    return f"{fmt_gb(package.traffic_bytes)} — {fmt_money(package.price)}"
+    return f"{fmt_gb_set(package.traffic_bytes)} — {fmt_money(package.price)}"
 
 
 def traffic_credited(size_bytes: int | None, pending: bool) -> str:
     text = (
         f"{emoji.tg('ok')} Оплата подтверждена. Начислено "
-        f"{fmt_gb(size_bytes)} трафика «{BTN_WHITELIST}».\n"
+        f"{fmt_gb_set(size_bytes)} трафика «{BTN_WHITELIST}».\n"
         "Срок подписки не меняется, купленный трафик не сгорает."
     )
     if pending:
@@ -1075,7 +1099,7 @@ def traffic_credited(size_bytes: int | None, pending: bool) -> str:
 
 def traffic_credited_expired(size_bytes: int | None) -> str:
     return (
-        f"{emoji.tg('ok')} Оплата подтверждена. Начислено {fmt_gb(size_bytes)} "
+        f"{emoji.tg('ok')} Оплата подтверждена. Начислено {fmt_gb_set(size_bytes)} "
         f"трафика «{BTN_WHITELIST}».\n\n"
         "Подписка сейчас не активна, поэтому конфиг остановлен. Трафик сохранён и "
         "станет доступен после продления подписки."
@@ -1146,8 +1170,8 @@ def admin_whitelist_home(config, server, summary, packages) -> str:
             lines.append(f"Сверка: {server.inventory_error}")
     lines.extend([
         "",
-        f"Бесплатно за оплату подписки: {fmt_gb(config.paid_free_bytes)}",
-        f"Бесплатно за пробный период: {fmt_gb(config.trial_free_bytes)}",
+        f"Бесплатно за оплату подписки: {fmt_gb_set(config.paid_free_bytes)}",
+        f"Бесплатно за пробный период: {fmt_gb_set(config.trial_free_bytes)}",
         "",
         "Пакеты покупки:",
     ])
@@ -1156,7 +1180,7 @@ def admin_whitelist_home(config, server, summary, packages) -> str:
     for package in packages:
         state = "" if package.enabled else " (отключён)"
         lines.append(
-            f"  #{package.id}: {fmt_gb(package.traffic_bytes)} — "
+            f"  #{package.id}: {fmt_gb_set(package.traffic_bytes)} — "
             f"{fmt_money(package.price)}{state}"
         )
     lines.extend([
@@ -1178,10 +1202,22 @@ def admin_whitelist_inventory(result) -> str:
         "ready": "Сервер готов к выдаче конфигов.",
         "error": "Сервер не готов: синхронизация не удалась.",
         "needs_choice": "Сервер не готов: выберите единственный целевой inbound.",
+        "incompatible": "Сервер не готов: SubHub не построит ссылку для целевого inbound.",
     }
     lines = [labels.get(result.status, result.status)]
     if result.error:
         lines.append(result.error)
+    if result.status == "incompatible":
+        lines.append(
+            "Конфиг не попал бы в подписку. Исправьте inbound в панели и "
+            "синхронизируйте сервер или выберите другой inbound."
+        )
+    if result.status == "ready":
+        lines.append(
+            "Проверен только формат inbound для ссылок SubHub. Это не подтверждает, "
+            "что панель добавлена в конфигурацию SubHub: проверьте её там "
+            "(GET /admin/servers) до выдачи."
+        )
     return "\n".join(lines)
 
 
@@ -1190,8 +1226,8 @@ def admin_whitelist_rollout_plan(plan, config) -> str:
     lines = [
         f"Выдача услуги «{BTN_WHITELIST}» нынешним пользователям",
         "",
-        f"Оплаченная подписка: {counts.get('paid', 0)} → {fmt_gb(config.paid_free_bytes)}",
-        f"Пробный период: {counts.get('trial', 0)} → {fmt_gb(config.trial_free_bytes)}",
+        f"Оплаченная подписка: {counts.get('paid', 0)} → {fmt_gb_set(config.paid_free_bytes)}",
+        f"Пробный период: {counts.get('trial', 0)} → {fmt_gb_set(config.trial_free_bytes)}",
         f"Бессрочный доступ: {counts.get('lifetime', 0)} → без ограничений",
         f"Неоднозначные: {counts.get('ambiguous', 0)} (нет оплаты, покрывающей "
         "текущий срок, и нет следа пробного периода — например, привязка или "
@@ -1233,7 +1269,7 @@ def admin_whitelist_packages(packages) -> str:
     for package in packages:
         state = "включён" if package.enabled else "отключён"
         lines.append(
-            f"#{package.id}: {fmt_gb(package.traffic_bytes)} — "
+            f"#{package.id}: {fmt_gb_set(package.traffic_bytes)} — "
             f"{fmt_money(package.price)} — {state}"
         )
     return "\n".join(lines)
@@ -1242,9 +1278,9 @@ def admin_whitelist_packages(packages) -> str:
 def _wl_event_label(event) -> str:
     parts = []
     if event.free_set is not None:
-        parts.append(f"бесплатный := {fmt_gb(event.free_set)}")
+        parts.append(f"бесплатный := {fmt_gb_set(event.free_set)}")
     if event.paid_delta is not None:
-        parts.append(f"купленный +{fmt_gb(event.paid_delta)}")
+        parts.append(f"купленный +{fmt_gb_set(event.paid_delta)}")
     state = {"pending": "ждёт сверки", "uncertain": "нужно решение"}.get(
         event.status, event.status
     )

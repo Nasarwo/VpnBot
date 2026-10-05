@@ -19,7 +19,7 @@ from app.bot.callbacks import (
 from app.bot.states import OnboardingStates, ProofStates
 from app.config import Settings
 from app.db.enums import AttachmentType, UserRole
-from app.db.models import User, VpnClient
+from app.db.models import PaymentRequest, User, VpnClient
 from app.db.repositories import (
     BindRequestRepository,
     PaymentRepository,
@@ -502,12 +502,16 @@ async def select_plan(
         await ui.answer_callback(callback, "Тариф не найден", show_alert=True)
         return
 
-    payment = await payments.create_request(
-        session,
-        user_id=db_user.id,
-        amount=float(plan.amount_rub),
-        period_days=plan.period_days,
-    )
+    try:
+        payment = await payments.create_request(
+            session,
+            user_id=db_user.id,
+            amount=float(plan.amount_rub),
+            period_days=plan.period_days,
+        )
+    except payments.PendingRequestExists as exc:
+        await _refuse_pending_request(callback, state, exc.payment)
+        return
     await _edit(
         callback,
         texts.payment_created(payment, settings.payment_details_text),
@@ -516,6 +520,16 @@ async def select_plan(
     # Админа уведомляем только после того, как пользователь пришлёт подтверждение.
     await state.set_state(ProofStates.waiting_proof)
     await ui.answer_callback(callback)
+
+
+async def _refuse_pending_request(
+    callback: CallbackQuery, state: FSMContext, payment: PaymentRequest
+) -> None:
+    """Прежняя заявка с квитанцией на проверке: новой не создаём, квитанций не ждём."""
+    await state.clear()
+    await ui.answer_callback(
+        callback, texts.payment_pending_review(payment), show_alert=True
+    )
 
 
 async def _cancel_payment(
@@ -693,12 +707,7 @@ async def whitelist_menu(
                 session, db_user.id, callback_data.value
             )
         except payments.PendingRequestExists as exc:
-            await ui.answer_callback(
-                callback,
-                f"Заявка {exc.payment.payment_code} уже на проверке. "
-                "Дождитесь решения администратора.",
-                show_alert=True,
-            )
+            await _refuse_pending_request(callback, state, exc.payment)
             return
         except payments.PaymentRequestError as exc:
             await ui.answer_callback(callback, str(exc), show_alert=True)

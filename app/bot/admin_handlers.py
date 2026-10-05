@@ -936,7 +936,7 @@ async def _after_applied_payment(
             active=state.active,
             pending=result.whitelist_pending,
         )
-        headline = f"Начислено {texts.fmt_gb(result.traffic_bytes)} трафика."
+        headline = f"Начислено {texts.fmt_gb_set(result.traffic_bytes)} трафика."
         if not state.active:
             headline += " Подписка не активна: конфиг остаётся выключенным."
         elif result.whitelist_pending:
@@ -1815,6 +1815,11 @@ async def manual_extend(
         updater=_get_updater(settings),
     )
     if result.applied:
+        await trigger_configured_sync(
+            settings.subhub_url,
+            settings.subhub_admin_token,
+            timeout=settings.subhub_timeout_seconds,
+        )
         await message.answer(
             f"Клиент продлён до {result.new_expires_at:%d.%m.%Y %H:%M UTC}"
         )
@@ -1865,6 +1870,13 @@ async def sync_user(
         await message.answer(str(exc))
         return
 
+    # Срок перенесён на панели (обычные и, отдельно, конфиг услуги) — SubHub
+    # перечитывает их; лишний вызов безопасен.
+    await trigger_configured_sync(
+        settings.subhub_url,
+        settings.subhub_admin_token,
+        timeout=settings.subhub_timeout_seconds,
+    )
     ok = sum(1 for r in results if r.ok)
     failed = [r for r in results if not r.ok]
     text = f"Синхронизация завершена. Успешно: {ok}, ошибок: {len(failed)}."
@@ -1892,7 +1904,10 @@ async def _whitelist_home(session: AsyncSession) -> tuple[str, InlineKeyboardMar
     summary = await whitelist.admin_summary(session)
     packages = await whitelist.list_packages(session, only_enabled=False)
     candidates = []
-    if server is not None and server.inventory_status == whitelist.INVENTORY_NEEDS_CHOICE:
+    if server is not None and server.inventory_status in (
+        whitelist.INVENTORY_NEEDS_CHOICE, whitelist.INVENTORY_INCOMPATIBLE,
+    ):
+        # При несовместимой цели выбор можно поменять на другой inbound панели.
         candidates = sorted(server.inbounds, key=lambda i: i.inbound_id)
     await session.commit()
     return (
@@ -1967,11 +1982,14 @@ async def whitelist_admin(
             alert = texts.admin_whitelist_inventory(result)
         else:
             try:
-                await whitelist.choose_inbound(session, server, value, db_user.id)
+                result = await whitelist.choose_inbound(
+                    session, server, value, db_user.id,
+                    timeout=float(settings.xui_request_timeout),
+                )
             except whitelist.WhitelistError as exc:
                 await ui.answer_callback(callback, str(exc), show_alert=True)
                 return
-            alert = f"Целевой inbound: {value}"
+            alert = texts.admin_whitelist_inventory(result)
         if whitelist.server_ready(await whitelist.get_active_server(session)):
             await whitelist.process_due(session, updater)
         text, markup = await _whitelist_home(session)
@@ -2228,6 +2246,12 @@ async def whitelist_adjust_cmd(
         await session.rollback()
         await message.answer(f"Не изменено: {exc}")
         return
+    if outcome.applied:
+        await trigger_configured_sync(
+            settings.subhub_url,
+            settings.subhub_admin_token,
+            timeout=settings.subhub_timeout_seconds,
+        )
     text, markup = await _whitelist_user_card(session, target, None)
     status = "Применено на сервере." if outcome.applied else "Сохранено; применение ожидается."
     await message.answer(f"{status}\n\n{text}", reply_markup=markup)
@@ -2275,6 +2299,12 @@ async def whitelist_resolve_cmd(
         await session.rollback()
         await message.answer(f"Не изменено: {exc}")
         return
+    if outcome.applied:
+        await trigger_configured_sync(
+            settings.subhub_url,
+            settings.subhub_admin_token,
+            timeout=settings.subhub_timeout_seconds,
+        )
     text, markup = await _whitelist_user_card(session, target, None)
     status = "Применено на сервере." if outcome.applied else "Сохранено; применение ожидается."
     await message.answer(f"{status}\n\n{text}", reply_markup=markup)

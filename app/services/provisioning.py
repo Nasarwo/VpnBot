@@ -5,6 +5,7 @@ import logging
 import uuid as uuid_lib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -361,6 +362,12 @@ async def import_inbounds(
     Удалённые и выключенные на панели цели отключаются. Ручное отключение
     существующей цели сохраняется. Возвращает added/skipped/exists/disabled.
     """
+    inbounds = await fetch_inbounds(server, timeout)
+    return await reconcile_inbounds(session, server, inbounds)
+
+
+async def fetch_inbounds(server: Server, timeout: float = 15.0) -> list[dict[str, Any]]:
+    """Читает список inbound'ов панели (``inbounds/list``) как есть."""
     async with XuiClient(
         base_url=server.panel_url,
         username=server.username,
@@ -368,10 +375,15 @@ async def import_inbounds(
         timeout=timeout,
     ) as client:
         try:
-            inbounds = await client.list_inbounds()
+            return await client.list_inbounds()
         except XuiError as exc:
             raise PanelUpdateError(str(exc)) from exc
 
+
+async def reconcile_inbounds(
+    session: AsyncSession, server: Server, inbounds: list[dict[str, Any]]
+) -> list[tuple[int, str, str]]:
+    """Сверка реестра с уже прочитанным списком (см. :func:`import_inbounds`)."""
     existing = {
         item.inbound_id: item for item in
         (

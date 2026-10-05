@@ -63,29 +63,36 @@ async def _server_health_poller(settings: Settings) -> None:
     updater = build_updater(timeout=float(settings.xui_request_timeout))
     sessionmaker = get_sessionmaker()
 
-    def subhub_sync():  # type: ignore[no-untyped-def]
-        return trigger_configured_sync(
+    async def subhub_sync(reason: str) -> bool:
+        logger.info("SubHub: запрос синхронизации после фоновых изменений (%s)", reason)
+        return await trigger_configured_sync(
             settings.subhub_url,
             settings.subhub_admin_token,
             timeout=settings.subhub_timeout_seconds,
         )
 
+    async def pending_applied() -> bool:
+        return await subhub_sync("отложенные обновления серверов")
+
     while True:
         try:
             async with sessionmaker() as session:
-                await billing.recover_confirmed_payments(session, updater)
+                # Возобновлённая после рестарта оплата меняет панели так же, как
+                # подтверждение администратором, — SubHub должен их перечитать.
+                if await billing.recover_confirmed_payments(session, updater):
+                    await subhub_sync("возобновлены оплаты")
                 await health.check_servers(
                     session,
                     timeout=timeout,
                     updater=updater,
-                    on_updates_applied=subhub_sync,
+                    on_updates_applied=pending_applied,
                 )
         except Exception:  # noqa: BLE001 - фоновая задача не должна падать
             logger.exception("Ошибка фоновой проверки серверов")
         try:
             async with sessionmaker() as session:
                 if await whitelist.process_due(session, updater):
-                    await subhub_sync()
+                    await subhub_sync("очередь «Обход белых списков»")
         except Exception:  # noqa: BLE001 - фоновая задача не должна падать
             logger.exception("Ошибка фоновой синхронизации «Обход белых списков»")
         await asyncio.sleep(interval)
@@ -136,6 +143,50 @@ async def _expiry_notify_poller(bot: Bot, settings: Settings) -> None:
         except Exception:  # noqa: BLE001 - фоновая задача не должна падать
             logger.exception("Ошибка фоновых уведомлений об окончании подписки")
         await asyncio.sleep(interval)
+
+
+def start_background_tasks(bot: Bot, settings: Settings) -> list[asyncio.Task]:
+    """Запускает фоновые циклы процесса бота (кроме доставки сайта).
+
+    Одна сборка для обычного запуска рядом с Telegram polling и для
+    изолированной приёмки без polling: те же функции, настройки и условия
+    включения. ``bot`` нужен только уведомлениям об окончании подписки.
+    """
+    tasks: list[asyncio.Task] = []
+    if settings.anti_sharing_enabled and settings.anti_sharing_poll_minutes > 0:
+        tasks.append(asyncio.create_task(_anti_sharing_poller(settings)))
+        logger.info(
+            "Антишеринг-мониторинг включён, период сбора: %s мин",
+            settings.anti_sharing_poll_minutes,
+        )
+    if settings.server_health_poll_seconds > 0:
+        tasks.append(asyncio.create_task(_server_health_poller(settings)))
+        logger.info(
+            "Проверка доступности серверов включена, период: %s c",
+            settings.server_health_poll_seconds,
+        )
+    if settings.whitelist_reconcile_minutes > 0:
+        tasks.append(asyncio.create_task(_whitelist_reconcile_poller(settings)))
+        logger.info(
+            "Сверка расхода «Обход белых списков» включена: пауза между обходами "
+            "%s мин, пачка %s, пауза между пачками %s c",
+            settings.whitelist_reconcile_minutes,
+            settings.whitelist_reconcile_batch_size,
+            settings.whitelist_reconcile_batch_pause_seconds,
+        )
+    if settings.expiry_notify_poll_seconds > 0:
+        tasks.append(asyncio.create_task(_expiry_notify_poller(bot, settings)))
+        logger.info(
+            "Уведомления об окончании подписки включены, период: %s c",
+            settings.expiry_notify_poll_seconds,
+        )
+    return tasks
+
+
+async def stop_background_tasks(tasks: list[asyncio.Task]) -> None:
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _setup_menu_button(bot: Bot) -> None:
@@ -210,44 +261,12 @@ async def run() -> None:
     web_runner = await start_bridge(bot, settings)
     if web_runner:
         background_tasks.append(asyncio.create_task(delivery_loop(bot)))
-    if settings.anti_sharing_enabled and settings.anti_sharing_poll_minutes > 0:
-        background_tasks.append(asyncio.create_task(_anti_sharing_poller(settings)))
-        logger.info(
-            "Антишеринг-мониторинг включён, период сбора: %s мин",
-            settings.anti_sharing_poll_minutes,
-        )
-    if settings.server_health_poll_seconds > 0:
-        background_tasks.append(asyncio.create_task(_server_health_poller(settings)))
-        logger.info(
-            "Проверка доступности серверов включена, период: %s c",
-            settings.server_health_poll_seconds,
-        )
-    if settings.whitelist_reconcile_minutes > 0:
-        background_tasks.append(
-            asyncio.create_task(_whitelist_reconcile_poller(settings))
-        )
-        logger.info(
-            "Сверка расхода «Обход белых списков» включена: пауза между обходами "
-            "%s мин, пачка %s, пауза между пачками %s c",
-            settings.whitelist_reconcile_minutes,
-            settings.whitelist_reconcile_batch_size,
-            settings.whitelist_reconcile_batch_pause_seconds,
-        )
-    if settings.expiry_notify_poll_seconds > 0:
-        background_tasks.append(
-            asyncio.create_task(_expiry_notify_poller(bot, settings))
-        )
-        logger.info(
-            "Уведомления об окончании подписки включены, период: %s c",
-            settings.expiry_notify_poll_seconds,
-        )
+    background_tasks.extend(start_background_tasks(bot, settings))
 
     try:
         await dp.start_polling(bot)
     finally:
-        for task in background_tasks:
-            task.cancel()
-        await asyncio.gather(*background_tasks, return_exceptions=True)
+        await stop_background_tasks(background_tasks)
         if web_runner:
             await web_runner.cleanup()
         await bot.session.close()

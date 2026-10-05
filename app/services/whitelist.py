@@ -41,7 +41,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -71,6 +71,7 @@ from app.services.panel_updater import (
     QuotaClientState,
     QuotaTarget,
 )
+from app.services.whitelist_compat import InboundCompat, check_inbound, describe
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,8 @@ DEFAULT_PACKAGES: tuple[tuple[int, int], ...] = (
 INVENTORY_READY = "ready"
 INVENTORY_ERROR = "error"
 INVENTORY_NEEDS_CHOICE = "needs_choice"
+# Целевой inbound выбран, но SubHub не построит для него рабочую ссылку.
+INVENTORY_INCOMPATIBLE = "incompatible"
 
 # Ключи журнала: одна выдача/начисление на исходную операцию.
 LEDGER_FREE_GRANT = "free_grant"
@@ -132,6 +135,26 @@ def _ms(value: datetime) -> int:
 
 def gib_to_bytes(value: Decimal | float | int) -> int:
     return int(Decimal(str(value)) * GIB)
+
+
+def set_volume_gib_text(size_bytes: int | None) -> str:
+    """Заданный объём в ГБ (без единицы, точка): так, как он вводился.
+
+    Байты при вводе усекаются (`gib_to_bytes`), поэтому 0,02 ГБ хранится как
+    21474836 Б и округление вниз показало бы 0,01. Берётся самая короткая запись
+    с 2–4 знаками, которая переводится обратно ровно в те же байты; если такой нет
+    (байты не из ввода), значение усекается до сотых — вверх не округляется.
+    Учёт и API панели от этого текста не зависят.
+    """
+    size = max(0, size_bytes or 0)
+    exact = Decimal(size) / GIB
+    shown = exact.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    for places in (2, 3, 4):
+        candidate = exact.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+        if gib_to_bytes(candidate) == size:
+            shown = candidate
+            break
+    return f"{shown:f}".rstrip("0").rstrip(".")
 
 
 # --- Чистые правила учёта ---------------------------------------------------
@@ -415,6 +438,8 @@ class InventoryResult:
     summary: list[tuple[int, str, str]] = field(default_factory=list)
     error: str | None = None
     candidates: list[ServerInbound] = field(default_factory=list)
+    # Вердикт совместимости целевого inbound с форматом ссылок SubHub.
+    target: InboundCompat | None = None
 
 
 async def sync_inventory(
@@ -429,6 +454,8 @@ async def sync_inventory(
     Используется общая сверка реестра (удалённые/выключенные отключаются,
     ручное отключение сохраняется). Целевой inbound должен быть ровно один:
     при нескольких кандидатах сервер не готов, пока администратор не выберет.
+    Готов сервер только с целью, для которой SubHub построит ссылку
+    (:mod:`app.services.whitelist_compat`); иначе — ``incompatible``.
     """
     if server.purpose != SERVER_PURPOSE_WHITELIST:
         raise WhitelistError("Сервер не относится к услуге «Обход белых списков»")
@@ -437,7 +464,8 @@ async def sync_inventory(
     )
     before_enabled = {i.inbound_id for i in loaded.scalars().all() if i.enabled}
     try:
-        summary = await provisioning.import_inbounds(session, server, timeout=timeout)
+        raw_inbounds = await provisioning.fetch_inbounds(server, timeout=timeout)
+        summary = await provisioning.reconcile_inbounds(session, server, raw_inbounds)
     except PanelUpdateError as exc:
         server.inventory_status = INVENTORY_ERROR
         server.inventory_error = str(exc)[:1000]
@@ -464,37 +492,55 @@ async def sync_inventory(
         .scalars()
         .all()
     )
+    raw_by_id = {item.get("id"): item for item in raw_inbounds}
+
+    def verdict(row: ServerInbound) -> InboundCompat:
+        raw = raw_by_id.get(row.inbound_id) or {
+            "id": row.inbound_id, "protocol": row.protocol.value,
+        }
+        return check_inbound(raw, flow=row.flow)
+
     enabled = [row for row in rows if row.enabled]
     kept = [row for row in enabled if row.inbound_id in before_enabled]
     result = InventoryResult(status=INVENTORY_READY, summary=summary)
+    messages: list[str] = []
+    target: ServerInbound | None = None
     if len(kept) == 1:
         # Выбранная ранее цель сохраняется; новые inbound'ы не подключаются
         # автоматически и показываются администратору как расхождение.
+        target = kept[0]
         for row in enabled:
-            if row is not kept[0]:
+            if row is not target:
                 row.enabled = False
                 result.candidates.append(row)
         if result.candidates:
-            result.error = (
+            messages.append(
                 "На панели появились дополнительные inbound'ы: "
-                + ", ".join(str(r.inbound_id) for r in result.candidates)
-                + f". Целевым остаётся {kept[0].inbound_id}."
+                + ", ".join(describe(verdict(r)) for r in result.candidates)
+                + f". Целевым остаётся {target.inbound_id}."
             )
     elif len(enabled) == 1:
-        pass
+        target = enabled[0]
     elif not enabled:
         result.status = INVENTORY_ERROR
-        result.error = "На панели нет включённого поддерживаемого inbound"
+        messages.append("На панели нет включённого поддерживаемого inbound")
     else:
         for row in enabled:
             row.enabled = False
         result.status = INVENTORY_NEEDS_CHOICE
         result.candidates = enabled
-        result.error = (
+        messages.append(
             "Ожидался один inbound, найдено несколько: "
-            + ", ".join(f"{r.inbound_id} ({r.protocol.value})" for r in enabled)
+            + ", ".join(describe(verdict(r)) for r in enabled)
             + ". Выберите целевой inbound."
         )
+    if target is not None:
+        result.target = verdict(target)
+        if not result.target.compatible:
+            result.status = INVENTORY_INCOMPATIBLE
+        messages.insert(0, "Целевой inbound " + describe(result.target) + ".")
+        messages.extend(result.target.notes)
+    result.error = "\n".join(messages) or None
     server.inventory_status = result.status
     server.inventory_error = result.error
     server.inventory_synced_at = _utcnow()
@@ -509,15 +555,25 @@ async def sync_inventory(
             "status": result.status,
             "enabled": [r.inbound_id for r in rows if r.enabled],
             "candidates": [r.inbound_id for r in result.candidates],
+            "problems": list(result.target.problems) if result.target else [],
         },
     )
     return result
 
 
 async def choose_inbound(
-    session: AsyncSession, server: Server, inbound_id: int, actor_user_id: int | None
-) -> None:
-    """Делает выбранный inbound единственной целью whitelist-сервера."""
+    session: AsyncSession,
+    server: Server,
+    inbound_id: int,
+    actor_user_id: int | None,
+    *,
+    timeout: float = 15.0,
+) -> InventoryResult:
+    """Делает выбранный inbound единственной целью whitelist-сервера.
+
+    Готовность выставляет не выбор, а следующая за ним сверка с панелью:
+    она же проверяет совместимость цели с SubHub.
+    """
     rows = list(
         (
             await session.execute(
@@ -532,8 +588,6 @@ async def choose_inbound(
         raise WhitelistError("Inbound не найден в реестре сервера")
     for row in rows:
         row.enabled = row is chosen
-    server.inventory_status = INVENTORY_READY
-    server.inventory_error = None
     await audit.record(
         session,
         action="whitelist.inbound_chosen",
@@ -542,7 +596,12 @@ async def choose_inbound(
         entity_id=server.id,
         payload={"inbound_id": inbound_id},
     )
+    await session.flush()
+    result = await sync_inventory(
+        session, server, timeout=timeout, actor_user_id=actor_user_id
+    )
     await session.commit()
+    return result
 
 
 # --- Учёт пользователя --------------------------------------------------------
