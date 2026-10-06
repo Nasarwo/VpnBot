@@ -186,8 +186,13 @@ async def test_accounts_without_panel_client_are_skipped_not_repeated(
 ):
     await _populate(session, wl_server, panel, 120, on_panel=False)
     await _populate(session, wl_server, panel, 10, first=500, used=GIB)
-    report = await _cycle(session, panel)
+    status = whitelist.ReconcileStatus()
+    report = await _cycle(session, panel, status=status)
     assert (report.reconciled, report.skipped_no_client, report.errors) == (10, 120, 0)
+    # Учёты без клиента на панели не сверены: подтверждённой свежести нет.
+    assert status.last_complete_at is not None and status.last_success_at is None
+    text = "\n".join(texts.reconcile_status_lines(status))
+    assert "нет клиента на панели 120" in text and "все учёты сверены" not in text
     assert report.accounts == 130 and len(set(panel.read_emails)) == 130
 
 
@@ -425,9 +430,15 @@ async def test_account_that_stays_busy_is_reported_as_skipped(
         return await original(session, user_id, *args, **kwargs)
 
     monkeypatch.setattr(whitelist, "_reconcile_one", always_busy)
-    report = await _cycle(session, panel)
+    status = whitelist.ReconcileStatus()
+    report = await _cycle(session, panel, status=status)
     assert report.complete and report.skipped_busy == 1 and report.reconciled == 4
+    assert report.errors == 0 and report.accounts == 5  # без двойного учёта
     assert panel.read_emails.count(_email(2)) == 2  # один повтор, не бесконечный
+    # Обход завершён, но один учёт не сверен: свежесть всех данных не подтверждена.
+    assert status.last_complete_at is not None and status.last_success_at is None
+    text = "\n".join(texts.reconcile_status_lines(status))
+    assert "все учёты сверены" not in text and "изменились во время обхода 1" in text
 
 
 # --- Наблюдаемость ----------------------------------------------------------------
@@ -456,25 +467,63 @@ async def test_admin_summary_exposes_reconcile_status(session, wl_server, servic
     assert summary.reconcile is whitelist.RECONCILE_STATUS
 
 
+def _text_report(now, **counts):
+    report = whitelist.ReconcileReport(
+        server_id=1, started_at=now - timedelta(minutes=30),
+        finished_at=now - timedelta(minutes=29), batches=1,
+    )
+    for name, value in counts.items():
+        setattr(report, name, value)
+    return report
+
+
 def test_reconcile_text_describes_age_and_abort():
     now = datetime.now(UTC)
     status = whitelist.ReconcileStatus()
     assert "ещё не завершён" in texts.reconcile_status_lines(status, now)[0]
-    report = whitelist.ReconcileReport(
-        server_id=1, started_at=now - timedelta(minutes=30),
-        finished_at=now - timedelta(minutes=29),
-    )
-    report.reconciled, report.errors, report.batches = 90, 2, 1
+    report = _text_report(now, reconciled=90)
     status.last_report = report
-    status.last_success_at = now - timedelta(minutes=29)
-    status.last_success_started_at = report.started_at
+    status.last_complete_at = status.last_success_at = report.finished_at
+    status.last_complete_started_at = status.last_success_started_at = report.started_at
     status.current = whitelist.ReconcileReport(
         server_id=1, started_at=now, aborted="panel_unavailable", remaining=40
     )
     lines = "\n".join(texts.reconcile_status_lines(status, now))
-    assert "29 мин назад" in lines and "не старше 30 мин" in lines
-    assert "сверено 90" in lines and "ошибок 2" in lines
+    assert "29 мин назад, все учёты сверены" in lines and "не старше 30 мин" in lines
+    assert "сверено 90" in lines and "ошибок 0" in lines
     assert "прерван (panel_unavailable), впереди учётов: 40" in lines
+
+
+def test_reconcile_text_does_not_promise_freshness_for_unconfirmed_accounts():
+    now = datetime.now(UTC)
+    status = whitelist.ReconcileStatus()
+    report = _text_report(now, reconciled=90, errors=2, skipped_busy=3, skipped_no_client=4)
+    status.last_report = report
+    status.last_complete_at = report.finished_at
+    status.last_complete_started_at = report.started_at
+    lines = texts.reconcile_status_lines(status, now)
+    head = lines[0]
+    assert "не сверено учётов: 9" in head
+    assert "ошибок 2" in head and "изменились во время обхода 3" in head
+    assert "нет клиента на панели 4" in head
+    assert "все учёты сверены" not in head and "данные учёта не старше" not in "\n".join(lines)
+    assert "их данные могут быть старше" in head.lower() and "сверенные не старше 30 мин" in head
+    assert "полностью подтверждённого обхода с запуска бота ещё не было" in lines[1]
+
+
+def test_reconcile_text_keeps_old_confirmed_traversal_next_to_newer_gaps():
+    now = datetime.now(UTC)
+    status = whitelist.ReconcileStatus()
+    status.last_success_at = now - timedelta(minutes=60)
+    status.last_success_started_at = now - timedelta(minutes=65)
+    report = _text_report(now, reconciled=98, errors=2)
+    status.last_report = report
+    status.last_complete_at = report.finished_at
+    status.last_complete_started_at = report.started_at
+    lines = "\n".join(texts.reconcile_status_lines(status, now))
+    assert "последний обход завершён 29 мин назад, но не сверено учётов: 2" in lines
+    assert "последний полностью подтверждённый обход завершён 60 мин назад" in lines
+    assert "данные учёта не старше 65 мин" in lines
 
 
 def test_next_delay_is_a_pause_not_a_deadline():
@@ -524,3 +573,145 @@ async def test_poller_uses_settings_global_status_and_adaptive_delay(monkeypatch
     assert seen["batch_size"] == 40 and seen["pause_seconds"] == 2.5
     assert seen["status"] is whitelist.RECONCILE_STATUS
     assert delays == [whitelist.RECONCILE_RETRY_SECONDS]  # прерванный обход повторяется скоро
+
+
+# --- Неудачный повтор BUSY: завершение обхода ≠ подтверждённая свежесть -------------
+
+
+def _busy_on_first_read(monkeypatch, user_ids: set[int]) -> dict[int, int]:
+    """Учёты, изменившиеся между чтением и сверкой: BUSY только при первом чтении."""
+    original = whitelist._reconcile_one
+    seen: dict[int, int] = {}
+
+    async def flaky(session, user_id, *args, **kwargs):
+        if user_id in user_ids:
+            seen[user_id] = seen.get(user_id, 0) + 1
+            if seen[user_id] == 1:
+                return whitelist.ReconcileOutcome.BUSY
+        return await original(session, user_id, *args, **kwargs)
+
+    monkeypatch.setattr(whitelist, "_reconcile_one", flaky)
+    return seen
+
+
+async def _user_ids(session, account_ids) -> set[int]:
+    return {(await session.get(WhitelistAccount, i)).user_id for i in account_ids}
+
+
+async def test_failed_busy_retry_is_not_successful_cycle(session, wl_server, panel, monkeypatch):
+    ids = await _populate(session, wl_server, panel, 2, used=GIB)
+    _busy_on_first_read(monkeypatch, await _user_ids(session, ids))
+    panel.unavailable_from_batch = 1  # первое чтение прошло, повторное — нет
+    status = whitelist.ReconcileStatus()
+    report = await _cycle(session, panel, status=status)
+
+    assert report.complete and report.aborted is None
+    assert (report.errors, report.skipped_busy, report.reconciled) == (2, 0, 0)
+    assert report.accounts == 2 and report.unconfirmed == 2 and not report.confirmed
+    assert report.cursor == ids[-1] and status.current is None  # курсор дошёл до конца
+    assert status.last_complete_at is not None and status.last_success_at is None
+    assert status.last_success_started_at is None and status.worst_case_staleness(
+        datetime.now(UTC)) is None
+    assert not any(await _reconciled(session, ids))  # старая статистика учётов не тронута
+    text = "\n".join(texts.reconcile_status_lines(status))
+    assert "ошибок 2" in text and "не сверено учётов: 2" in text
+    assert "все учёты сверены" not in text and "данные учёта не старше" not in text
+
+
+async def test_retry_helper_reports_unreadable_batch_as_errors(session, wl_server, panel):
+    """Прямой вызов повтора: полностью нечитаемая пачка — ошибки, а не пропуск."""
+    ids = await _populate(session, wl_server, panel, 2, used=GIB)
+    panel.unavailable_from_batch = 0
+    report = whitelist.ReconcileReport(
+        server_id=wl_server.id, started_at=datetime.now(UTC), busy_ids=ids
+    )
+
+    async def sleep(_):
+        pass
+
+    await whitelist._retry_busy(
+        session, panel, wl_server, report, batch_size=100, pause_seconds=0, sleep=sleep
+    )
+    status = whitelist.ReconcileStatus()
+    await whitelist._finish_reconcile(session, status, report)
+    assert (report.errors, report.skipped_busy) == (2, 0)
+    assert status.last_success_at is None and status.last_complete_at is not None
+
+
+async def test_partly_failed_busy_retry_counts_each_account_once(
+    session, wl_server, panel, monkeypatch
+):
+    ids = await _populate(session, wl_server, panel, 5, used=GIB)
+    busy = await _user_ids(session, [ids[1], ids[3]])
+    _busy_on_first_read(monkeypatch, busy)
+
+    async def break_one_on_retry(index, emails):
+        if index == 0:
+            panel.errors = {_email(1)}  # только повторное чтение не вернёт клиента
+
+    panel.after_read = break_one_on_retry
+    status = whitelist.ReconcileStatus()
+    report = await _cycle(session, panel, status=status)
+
+    assert report.complete
+    assert (report.reconciled, report.errors, report.skipped_busy) == (4, 1, 0)
+    assert report.retried_busy == 1 and report.accounts == 5  # без двойного подсчёта
+    assert report.cursor == ids[-1]
+    assert [i for i, ok in enumerate(await _reconciled(session, ids)) if not ok] == [1]
+    assert status.last_complete_at is not None and status.last_success_at is None
+    assert "ошибок 1" in texts.reconcile_status_lines(status)[0]
+
+
+async def test_busy_again_without_http_error_still_withholds_freshness(
+    session, wl_server, panel, monkeypatch
+):
+    ids = await _populate(session, wl_server, panel, 3, used=GIB)
+    busy_user = (await session.get(WhitelistAccount, ids[0])).user_id
+    original = whitelist._reconcile_one
+
+    async def always_busy(session, user_id, *args, **kwargs):
+        if user_id == busy_user:
+            return whitelist.ReconcileOutcome.BUSY
+        return await original(session, user_id, *args, **kwargs)
+
+    monkeypatch.setattr(whitelist, "_reconcile_one", always_busy)
+    status = whitelist.ReconcileStatus()
+    report = await _cycle(session, panel, status=status)
+    assert (report.errors, report.skipped_busy, report.reconciled) == (0, 1, 2)
+    assert report.accounts == 3 and report.unconfirmed == 1
+    assert status.last_success_at is None
+    head = texts.reconcile_status_lines(status)[0]
+    assert "изменились во время обхода 1" in head and "все учёты сверены" not in head
+
+
+async def test_next_clean_traversal_recovers_and_old_confirmation_survives_gap(
+    session, wl_server, panel, monkeypatch
+):
+    ids = await _populate(session, wl_server, panel, 3, used=GIB)
+    status = whitelist.ReconcileStatus()
+    first = await _cycle(session, panel, status=status)
+    assert first.confirmed and status.last_success_at == first.finished_at
+    confirmed_at, confirmed_started = status.last_success_at, status.last_success_started_at
+
+    # Следующий обход: повтор BUSY не читается — подтверждение прежнее, завершение новое.
+    panel.batches.clear()
+    panel.unavailable_from_batch = 1
+    _busy_on_first_read(monkeypatch, await _user_ids(session, ids[:2]))
+    second = await _cycle(session, panel, status=status)
+    assert second is not first and second.errors == 2 and not second.confirmed
+    assert status.last_success_at == confirmed_at
+    assert status.last_success_started_at == confirmed_started
+    assert status.last_complete_at == second.finished_at and status.last_report is second
+    lines = texts.reconcile_status_lines(status)
+    assert "но не сверено учётов: 2" in lines[0]
+    assert "последний полностью подтверждённый обход" in lines[1]
+
+    # Панель восстановилась, учёты больше не заняты: подтверждение обновляется.
+    panel.batches.clear()
+    panel.unavailable_from_batch = None
+    monkeypatch.undo()
+    third = await _cycle(session, panel, status=status)
+    assert third.confirmed and (third.errors, third.skipped_busy) == (0, 0)
+    assert status.last_success_at == third.finished_at >= confirmed_at
+    assert status.last_success_started_at == third.started_at
+    assert "все учёты сверены" in texts.reconcile_status_lines(status)[0]

@@ -168,6 +168,7 @@ def test_set_volume_never_exceeds_what_bytes_can_prove():
 def test_remainder_on_admin_user_screen_is_floor_and_exact_bytes():
     account = SimpleNamespace(
         free_bytes=21474836, paid_bytes=1181116006, usage_checkpoint_bytes=0,
+        usage_observed_bytes=0, usage_observed_at=None,
         last_synced_at=None, applied_total_bytes=0, applied_enable=True,
         applied_version=1, desired_version=1, admin_blocked=False, last_error=None,
         conflict=None,

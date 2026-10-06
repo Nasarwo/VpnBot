@@ -1122,20 +1122,54 @@ def _fmt_span(seconds: float) -> str:
     return f"{seconds / 3600:.1f} ч".replace(".", ",")
 
 
+def _reconcile_gaps(report) -> str:
+    parts = []
+    if report.errors:
+        parts.append(f"ошибок {report.errors}")
+    if report.skipped_busy:
+        parts.append(f"изменились во время обхода {report.skipped_busy}")
+    if report.skipped_no_client:
+        parts.append(f"нет клиента на панели {report.skipped_no_client}")
+    return ", ".join(parts)
+
+
 def reconcile_status_lines(status, now: datetime | None = None) -> list[str]:
-    """Состояние фоновой сверки расхода для админ-раздела (по данным процесса)."""
+    """Состояние фоновой сверки расхода для админ-раздела (по данным процесса).
+
+    «Обход завершён» и «данные подтверждены» — разные утверждения: гарантия
+    «данные не старше…» для всех учётов даётся только после обхода, в котором сверен
+    каждый учёт; иначе она относится лишь к сверенным.
+    """
     now = now or datetime.now(UTC)
     report = status.last_report
     lines: list[str] = []
-    if status.last_success_at is None:
-        lines.append("Сверка расхода: чистый обход с запуска бота ещё не завершён")
+    if status.last_complete_at is None:
+        lines.append("Сверка расхода: ни один обход с запуска бота ещё не завершён")
     else:
-        age = _fmt_span(status.success_age(now).total_seconds())
-        worst = _fmt_span(status.worst_case_staleness(now).total_seconds())
-        lines.append(
-            f"Сверка расхода: последний обход без ошибок завершён {age} назад "
-            f"(данные учёта не старше {worst})"
-        )
+        age = _fmt_span(status.complete_age(now).total_seconds())
+        worst = _fmt_span(status.complete_worst_case_staleness(now).total_seconds())
+        if report is None or report.confirmed:
+            lines.append(
+                f"Сверка расхода: последний обход завершён {age} назад, все учёты "
+                f"сверены (данные учёта не старше {worst})"
+            )
+        else:
+            lines.append(
+                f"Сверка расхода: последний обход завершён {age} назад, но не сверено "
+                f"учётов: {report.unconfirmed} ({_reconcile_gaps(report)}). Их данные "
+                f"могут быть старше; сверенные не старше {worst}"
+            )
+            if status.last_success_at is None:
+                lines.append(
+                    "  полностью подтверждённого обхода с запуска бота ещё не было"
+                )
+            else:
+                ok_age = _fmt_span(status.success_age(now).total_seconds())
+                ok_worst = _fmt_span(status.worst_case_staleness(now).total_seconds())
+                lines.append(
+                    f"  последний полностью подтверждённый обход завершён {ok_age} "
+                    f"назад (данные учёта не старше {ok_worst})"
+                )
     if report is not None:
         lines.append(
             f"  последний обход: {_fmt_span(report.active_seconds)}, пачек {report.batches}, "
@@ -1191,10 +1225,70 @@ def admin_whitelist_home(config, server, summary, packages) -> str:
         f"Начисления ждут сверки расхода: {summary.unsettled}; "
         f"требуют решения: {summary.uncertain}",
     ])
+    lines.extend(placement_progress_lines(getattr(summary, "placement", None)))
     if summary.reconcile is not None:
         lines.extend(reconcile_status_lines(summary.reconcile))
     lines.append("Пользователь: /wl <telegram_id>")
     return "\n".join(lines)
+
+
+def placement_progress_lines(progress) -> list[str]:
+    """Фактический прогресс переноса клиентов на текущий целевой inbound."""
+    if progress is None:
+        return []
+    lines = [
+        f"Размещение на inbound {progress.inbound_id} (flow: {progress.flow or 'нет'}): "
+        f"подтверждено {progress.placed} из {progress.total}; ожидает {progress.pending}; "
+        f"ошибка {progress.failed}"
+    ]
+    if not progress.complete:
+        lines.append(
+            "Перенос клиентов не завершён: готовность сервера не означает, что клиенты "
+            "уже на целевом inbound. Очередь продолжает в фоне (с backoff при ошибках); "
+            "причина ошибки — в /wl <telegram_id>."
+        )
+    if progress.stale_links:
+        lines.append(f"Привязок услуги к прежним inbound ещё не снято: {progress.stale_links}")
+    return lines
+
+
+def admin_whitelist_placement(placement) -> list[str]:
+    if placement is None:
+        return []
+    links = ", ".join(
+        f"{inbound_id} ({_PLACEMENT_STATES.get(state, state)}"
+        + (", признана администратором" if origin == "claimed" else "")
+        + ")"
+        for inbound_id, state, origin in placement.links
+    ) or "нет"
+    if placement.confirmed:
+        status = (
+            f"inbound {placement.inbound_id}, flow {placement.flow or 'нет'} — подтверждено "
+            f"{_fmt_date(placement.confirmed_at)}"
+        )
+    elif placement.target_inbound_id is None:
+        status = "не подтверждено (у сервера нет единственной цели)"
+    else:
+        status = (
+            f"не подтверждено: цель — inbound {placement.target_inbound_id}, flow "
+            f"{placement.target_flow or 'нет'}"
+        )
+        if placement.inbound_id is not None:
+            status += (
+                f"; последнее подтверждённое — inbound {placement.inbound_id}, flow "
+                f"{placement.flow or 'нет'}"
+            )
+    return [
+        f"Размещение: {status}",
+        f"Привязки, созданные услугой: {links}",
+    ]
+
+
+_PLACEMENT_STATES = {
+    "attaching": "прикрепляется",
+    "attached": "подтверждена",
+    "detaching": "снимается",
+}
 
 
 def admin_whitelist_inventory(result) -> str:
@@ -1288,7 +1382,9 @@ def _wl_event_label(event) -> str:
     return f"  #{event.id} {_fmt_date(event.created_at)}: {', '.join(parts)} [{state}]{note}"
 
 
-def admin_whitelist_user(user, account, overview, events=(), outcomes=None) -> str:
+def admin_whitelist_user(
+    user, account, overview, events=(), outcomes=None, placement=None
+) -> str:
     lines = [
         f"«{BTN_WHITELIST}»: {user.public_id or '—'} (TG {user.telegram_id})",
         f"Статус: {_WL_STATUS.get(overview.status, overview.status)}",
@@ -1300,16 +1396,25 @@ def admin_whitelist_user(user, account, overview, events=(), outcomes=None) -> s
         f"Бесплатный: {fmt_gb(account.free_bytes)} ({account.free_bytes} байт)",
         f"Купленный: {fmt_gb(account.paid_bytes)} ({account.paid_bytes} байт)",
         f"Счётчик панели на сверке: {account.usage_checkpoint_bytes}",
+        f"Последнее чтение счётчика: {account.usage_observed_bytes} "
+        f"({_fmt_date(account.usage_observed_at)})",
         f"Последняя сверка: {_fmt_date(account.last_synced_at)}",
         f"Применено на панели: totalGB={account.applied_total_bytes}, "
         f"enable={account.applied_enable}, версия {account.applied_version}/"
         f"{account.desired_version}",
         f"Заблокирован админом: {'да' if account.admin_blocked else 'нет'}",
     ])
+    lines.extend(admin_whitelist_placement(placement))
     if account.last_error:
         lines.append(f"Ошибка применения: {account.last_error}")
     if account.conflict:
         lines.append(f"Расхождение: {account.conflict}")
+    carried = -(account.usage_checkpoint_bytes or 0)
+    if carried > 0:
+        lines.append(
+            f"После сброса счётчика с остатков ещё не списан расход прежней эпохи "
+            f"{fmt_gb(carried)} ({carried} байт); он вычтен из квоты"
+        )
     if events:
         lines.append("Начисления, не применённые к остаткам выше (по порядку):")
         lines.extend(_wl_event_label(event) for event in events)
@@ -1324,6 +1429,13 @@ def admin_whitelist_user(user, account, overview, events=(), outcomes=None) -> s
                 f"начисления #{uncertain.id}. Варианты на конец этого периода:",
                 f"  до: бесплатный {fmt_gb(free_b)}, купленный {fmt_gb(paid_b)}",
                 f"  после: бесплатный {fmt_gb(free_a)}, купленный {fmt_gb(paid_a)}",
+            ])
+            if (uncertain.anchor_min_bytes or 0) < 0:
+                lines.append(
+                    "Период прочитан до сброса счётчика панели; расход после последнего "
+                    "чтения до сброса неизвестен и в варианты не входит"
+                )
+            lines.extend([
                 f"Решение: /wlresolve {tg} до|после <причина> или "
                 f"/wladjust {tg} <бесплатно ГБ> <куплено ГБ> <причина>",
             ])

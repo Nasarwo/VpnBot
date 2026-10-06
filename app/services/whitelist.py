@@ -24,9 +24,23 @@
   ``uncertain``: неразделённый расход не списывается до решения администратора.
 * Квота панели при неприменённых событиях — гарантированная нижняя граница:
   ``checkpoint + остатки с событиями``; весь расход после точки ей учитывается.
+* Значения счётчика хранятся в координатах эпохи строки статистики. Сброс или
+  пересоздание клиента проверяется при каждом чтении — и тогда, когда событие
+  ждёт решения, — по последнему прочитанному значению (``usage_observed_bytes``)
+  и ``traffic_row_id``. Новая эпоха продолжает последнее чтение прежней: точка и
+  привязки сдвигаются на него, поэтому прежняя база не становится трафиком, а
+  ещё не списанный расход прежней эпохи (отрицательная точка) вычтен из квоты.
 * Сохранённое начисление и применение на панели разделены:
   ``desired_version``/``applied_version``. Панель синхронизируется по текущему
   состоянию БД, поэтому старая задача не может откатить новое состояние.
+* Размещение клиента (целевой inbound и его flow) — тоже целевое состояние БД.
+  Подтверждённое размещение хранится в ``placement_*`` учёта; привязки, созданные
+  самой услугой, — в ``WhitelistPlacement``. Смена цели или flow (выбор inbound,
+  сверка реестра, команды администратора, замена сервера) не требует отдельной
+  пометки: очередь выбирает учёты, у которых подтверждённое размещение не
+  совпадает с текущей целью. Перенос: прикрепить к цели → применить её параметры
+  → подтвердить чтением → снять прежние привязки услуги → подтвердить итог.
+  Чужие привязки (без строки ``WhitelistPlacement``) не снимаются.
 
 Все изменения остатков выполняются под пользовательской блокировкой
 (``operation_lock.user_operation``); функции с префиксом ``_`` предполагают,
@@ -43,7 +57,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
 
@@ -61,6 +75,7 @@ from app.db.models import (
     WhitelistAccount,
     WhitelistConfig,
     WhitelistLedger,
+    WhitelistPlacement,
 )
 from app.db.repositories import VpnClientRepository
 from app.services import audit, provisioning
@@ -70,6 +85,7 @@ from app.services.panel_updater import (
     PanelUpdater,
     QuotaClientState,
     QuotaTarget,
+    ServerProvision,
 )
 from app.services.whitelist_compat import InboundCompat, check_inbound, describe
 
@@ -113,6 +129,13 @@ RESOLVE_AFTER = "after"
 
 # Допуск расхождения часов панели (last_online) и бота (время события).
 LAST_ONLINE_SKEW = timedelta(minutes=1)
+
+# Привязка клиента, созданная услугой (WhitelistPlacement.state).
+PLACEMENT_ATTACHING = "attaching"  # чтение показало, что привязки нет; attach запрошен
+PLACEMENT_ATTACHED = "attached"  # подтверждена чтением
+PLACEMENT_DETACHING = "detaching"  # прежняя цель: снимается после подтверждения новой
+PLACEMENT_ORIGIN_SERVICE = "service"
+PLACEMENT_ORIGIN_CLAIMED = "claimed"  # признана администратором (/wlclaim)
 
 
 class WhitelistError(Exception):
@@ -196,6 +219,41 @@ def provisional_balances(
     return free, paid
 
 
+def quota_room(
+    account: WhitelistAccount, events: list[WhitelistLedger] | tuple[()] = ()
+) -> int:
+    """Гарантированный объём квоты сверх контрольной точки.
+
+    Остатки с неприменёнными событиями без неучтённого расхода. Отрицательная
+    точка после сброса счётчика — расход прежней эпохи, ещё не списанный с
+    остатков: он уже израсходован и в квоту новой эпохи не входит.
+    """
+    room = sum(max(0, value) for value in provisional_balances(account, events))
+    return room + min(0, account.usage_checkpoint_bytes or 0)
+
+
+def last_known_usage(
+    account: WhitelistAccount, events: list[WhitelistLedger] | tuple[()] = ()
+) -> int | None:
+    """Наибольшее прочитанное значение счётчика текущей эпохи; None — точки нет.
+
+    Меньшее значение при следующем чтении означает сброс счётчика.
+    """
+    known = account.usage_checkpoint_bytes
+    if known is None:
+        return None
+    if account.usage_observed_bytes is not None:
+        return max(known, account.usage_observed_bytes)
+    # Учёт, не читавшийся после появления usage_observed_bytes: последние чтения
+    # сохранены в привязках неприменённых событий.
+    for event in events:
+        if is_open(event):
+            for bound in (event.anchor_bytes, event.anchor_max_bytes):
+                if bound is not None:
+                    known = max(known, bound)
+    return known
+
+
 def uncertain_outcomes(
     account: WhitelistAccount, events: list[WhitelistLedger]
 ) -> tuple[tuple[int, int], tuple[int, int]] | None:
@@ -254,9 +312,9 @@ def compute_target(
     """
     if access.lifetime:
         return QuotaTarget(total_bytes=0, enable=not account.admin_blocked, expiry_ms=0)
-    used = account.usage_checkpoint_bytes or 0
-    free, paid = provisional_balances(account, events)
-    remaining = max(0, free) + max(0, paid)
+    # Отрицательная точка (сброс счётчика) уже уменьшила room; база квоты — 0.
+    used = max(0, account.usage_checkpoint_bytes or 0)
+    remaining = quota_room(account, events)
     # Исчерпанный лимит остаётся конечным: totalGB=0 означал бы безлимит.
     total = used + remaining if remaining > 0 else max(used, 1)
     # Без срока и без бессрочного доступа клиент считается истёкшим.
@@ -409,6 +467,11 @@ async def get_active_server(session: AsyncSession) -> Server | None:
 def target_inbound(server: Server) -> ServerInbound | None:
     enabled = [i for i in server.inbounds if i.enabled]
     return enabled[0] if len(enabled) == 1 else None
+
+
+def target_flow(inbound: ServerInbound) -> str:
+    """flow клиентов услуги на целевом inbound: только явно заданный ('' — без flow)."""
+    return inbound.flow or ""
 
 
 def server_ready(server: Server | None) -> bool:
@@ -825,10 +888,10 @@ def _settle_reading(
 ) -> None:
     """Сверка с прочитанным счётчиком: расход и события строго по порядку.
 
-    Все неприменённые события должны быть созданы до чтения. Уменьшение
-    счётчика или смена строки статистики (сброс/пересоздание клиента) не
-    считается новым трафиком: учитывается только расход с начала новой эпохи,
-    а расхождение фиксируется для администратора.
+    Все неприменённые события должны быть созданы до чтения. Смена эпохи
+    счётчика (сброс/пересоздание клиента) проверяется при каждом чтении, в том
+    числе пока событие ждёт решения администратора (см. ``_start_epoch``):
+    уменьшение счётчика не считается новым трафиком.
     """
     if state.used_bytes is None or ctx.server is None:
         return
@@ -837,50 +900,91 @@ def _settle_reading(
     if account.server_id is not None and account.server_id != server.id:
         # Счётчик прежнего сервера больше не прочитать.
         _lose_baseline(ctx, "Сменился сервер услуги")
-    if any(event.status == EVENT_UNCERTAIN for event in ctx.events):
-        # До решения администратора подтверждённые остатки не меняются; квота
-        # панели остаётся нижней границей и учитывает весь новый расход.
-        return
     used = state.used_bytes
-    checkpoint = account.usage_checkpoint_bytes
-    if checkpoint is None:
+    last = last_known_usage(account, ctx.events)
+    if last is None:
         # Первая точка отсчёта на этом сервере: прежний расход не списывается,
         # поэтому порядок событий относительно него не важен.
         account.usage_checkpoint_bytes = used
-    elif used < checkpoint or (
+    elif used < last or (
         account.traffic_row_id is not None
         and state.traffic_row_id is not None
         and state.traffic_row_id != account.traffic_row_id
     ):
-        note = (
-            f"Счётчик панели сброшен или клиент пересоздан: было {checkpoint} "
-            f"(строка {account.traffic_row_id}), стало {used} "
-            f"(строка {state.traffic_row_id}). Расход между последней сверкой и "
-            "сбросом панели неизвестен и не списан."
-        )
-        account.conflict = note
-        _record_ledger(
-            session, account, kind=LEDGER_REBASE, source_key=None,
-            free_before=account.free_bytes, paid_before=account.paid_bytes, note=note,
-        )
-        logger.warning("whitelist user=%s: %s", account.user_id, note)
-        # Новая эпоха начинается с нуля; привязки старой эпохи недействительны.
-        account.usage_checkpoint_bytes = 0
-        for event in ctx.events:
-            if is_open(event):
-                event.anchor_bytes = None
+        _start_epoch(session, ctx, state, last)
     account.traffic_row_id = state.traffic_row_id
     account.server_id = server.id
+    account.usage_observed_bytes = used
+    # Не раньше фактического чтения (read_at операции берётся до запроса к
+    # панели): пакетное чтение, начатое до этого момента, считается устаревшим.
+    account.usage_observed_at = max(read_at, _utcnow())
+    if any(event.status == EVENT_UNCERTAIN for event in ctx.events):
+        # До решения администратора подтверждённые остатки не меняются; квота
+        # панели остаётся нижней границей и учитывает весь новый расход.
+        return
     _settle_ordered(
         ctx, ctx.events, used=used, last_online=_last_online(state), read_at=read_at
     )
+
+
+def _start_epoch(
+    session: AsyncSession, ctx: _Context, state: QuotaClientState, last: int
+) -> None:
+    """Сброс счётчика или пересоздание клиента: начинается новая эпоха (без commit).
+
+    Новая эпоха продолжает последнее прочитанное значение прежней ``last``: точка и
+    привязки неприменённых событий сдвигаются на него и дальше сравниваются только
+    со счётчиком новой эпохи. Прежняя база не становится доступным трафиком; расход
+    прежней эпохи, ещё не списанный с остатков (событие ждёт решения), остаётся
+    вычтенным из квоты — отрицательная точка, — а решение администратора применяется
+    к прочитанному периоду точно. Расход между последним чтением и сбросом
+    неизвестен и не списывается. Остатки и журнал событий не меняются.
+    """
+    account = ctx.account
+    assert account.usage_checkpoint_bytes is not None
+    unsettled = last - account.usage_checkpoint_bytes
+    note = (
+        f"Счётчик панели сброшен или клиент пересоздан: последнее чтение {last} "
+        f"(строка {account.traffic_row_id}), стало {state.used_bytes} "
+        f"(строка {state.traffic_row_id}). Расход между последним чтением и "
+        "сбросом панели неизвестен и не списан."
+    )
+    if unsettled > 0:
+        note += (
+            f" Расход прежней эпохи {unsettled} байт ещё не списан с остатков: он "
+            "вычтен из квоты новой эпохи до сверки событий или решения администратора."
+        )
+    account.conflict = note
+    _record_ledger(
+        session, account, kind=LEDGER_REBASE, source_key=None,
+        free_before=account.free_bytes, paid_before=account.paid_bytes, note=note,
+    )
+    logger.warning("whitelist user=%s: %s", account.user_id, note)
+    account.usage_checkpoint_bytes -= last
+    for event in ctx.events:
+        if not is_open(event):
+            continue
+        shifted = False
+        if event.anchor_bytes is not None:
+            event.anchor_bytes -= last
+            shifted = True
+        # Границы без верхней (счётчик утрачен до события) относятся к другому
+        # счётчику и не пересчитываются.
+        if event.anchor_min_bytes is not None and event.anchor_max_bytes is not None:
+            event.anchor_min_bytes -= last
+            event.anchor_max_bytes -= last
+            shifted = True
+        if shifted:
+            _append_note(event, "Счётчик панели сброшен: привязка пересчитана в новую эпоху")
 
 
 def _lose_baseline(ctx: _Context, reason: str) -> None:
     """Прежний счётчик больше не прочитать (клиент удалён, сменился сервер).
 
     Расход до ожидающих событий на нём неизвестен, поэтому они становятся
-    неопределёнными, а не применяются с нулевым расходом.
+    неопределёнными, а не применяются с нулевым расходом. Значения прежнего
+    счётчика у неприменённых событий несравнимы с новым: привязки снимаются,
+    прочитанный период разделяется только корректировкой (``/wladjust``).
     """
     account = ctx.account
     if account.usage_checkpoint_bytes is not None:
@@ -890,8 +994,17 @@ def _lose_baseline(ctx: _Context, reason: str) -> None:
                 event.anchor_min_bytes = account.usage_checkpoint_bytes
                 event.anchor_max_bytes = None
                 _append_note(event, f"{reason}: расход до события не прочитан")
+    for event in ctx.events:
+        if not is_open(event):
+            continue
+        event.anchor_bytes = None
+        if event.anchor_max_bytes is not None:
+            event.anchor_max_bytes = None
+            _append_note(event, f"{reason}: период прочитан на прежнем счётчике")
     account.usage_checkpoint_bytes = None
     account.traffic_row_id = None
+    account.usage_observed_bytes = None
+    account.usage_observed_at = None
 
 
 @dataclass(slots=True)
@@ -979,6 +1092,8 @@ def _consistent_anchor(ctx: _Context, state: QuotaClientState | None) -> int | N
     if account.server_id != ctx.server.id or state.traffic_row_id != account.traffic_row_id:
         return None
     floor = account.usage_checkpoint_bytes or 0
+    if account.usage_observed_bytes is not None:
+        floor = max(floor, account.usage_observed_bytes)
     for event in ctx.events:
         if is_open(event):
             for bound in (event.anchor_bytes, event.anchor_max_bytes):
@@ -1062,6 +1177,148 @@ class SyncOutcome:
     error: str | None = None
     # Есть сохранённые события, ещё не сверенные с расходом на панели.
     unsettled: bool = False
+    # Квота применена, но перенос на текущую цель не завершён (прежняя привязка
+    # услуги не снята или итоговое размещение не подтверждено).
+    placement_pending: bool = False
+
+
+def _defer(account: WhitelistAccount, now: datetime, error: str | None = None) -> None:
+    """Повтор через backoff 1 мин → 1 ч; ошибка сохраняется для администратора."""
+    account.sync_attempts += 1
+    if error is not None:
+        account.last_error = error[:1000]
+    account.next_sync_at = now + timedelta(
+        seconds=min(3600, 60 * 2 ** min(account.sync_attempts - 1, 6))
+    )
+
+
+async def _list_placements(session: AsyncSession, user_id: int) -> list[WhitelistPlacement]:
+    result = await session.scalars(
+        select(WhitelistPlacement)
+        .where(WhitelistPlacement.user_id == user_id)
+        .order_by(WhitelistPlacement.id)
+        .execution_options(populate_existing=True)
+    )
+    return list(result.all())
+
+
+def _find_placement(
+    placements: list[WhitelistPlacement], server_id: int, inbound_id: int
+) -> WhitelistPlacement | None:
+    return next(
+        (
+            row for row in placements
+            if row.server_id == server_id and row.inbound_id == inbound_id
+        ),
+        None,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _Link:
+    """Привязка клиента учёта к inbound'у сервера (ключ строки WhitelistPlacement)."""
+
+    user_id: int
+    server_id: int
+    inbound_id: int
+    email: str
+
+    def row(self, state: str, now: datetime) -> WhitelistPlacement:
+        return WhitelistPlacement(
+            user_id=self.user_id, server_id=self.server_id, inbound_id=self.inbound_id,
+            panel_email=self.email, state=state, origin=PLACEMENT_ORIGIN_SERVICE,
+            created_at=now,
+        )
+
+
+def _record_attach_intent(
+    session: AsyncSession,
+    placements: list[WhitelistPlacement],
+    before: QuotaClientState | None,
+    link: _Link,
+    now: datetime,
+) -> None:
+    """Намерение прикрепить к цели — до запроса к панели (без commit).
+
+    Вызывается только после успешного чтения клиента: строка ``attaching``
+    появляется, лишь если чтение показало, что привязки к цели нет. Поэтому
+    привязка, найденная позже при такой строке, — результат запроса услуги, а
+    привязка без строки — чужая или существовавшая раньше.
+    """
+    row = _find_placement(placements, link.server_id, link.inbound_id)
+    if before is not None and link.inbound_id in before.inbound_ids:
+        return
+    if row is None:
+        row = link.row(PLACEMENT_ATTACHING, now)
+        session.add(row)
+        placements.append(row)
+    elif row.state != PLACEMENT_ATTACHING:
+        # Привязка услуги исчезла с панели (сняли вручную, inbound пересоздан).
+        row.state = PLACEMENT_ATTACHING
+        row.panel_email = link.email
+        row.updated_at = now
+
+
+def _confirm_attach(
+    session: AsyncSession,
+    placements: list[WhitelistPlacement],
+    state: QuotaClientState,
+    link: _Link,
+    now: datetime,
+) -> None:
+    """После подтверждённого применения: привязка к цели — услуги или чужая."""
+    row = _find_placement(placements, link.server_id, link.inbound_id)
+    if row is None and link.inbound_id in state.attached_inbound_ids:
+        # Панель прочитана непосредственно перед attach этого вызова: привязки не было.
+        row = link.row(PLACEMENT_ATTACHED, now)
+        session.add(row)
+        placements.append(row)
+    if row is not None and link.inbound_id in state.inbound_ids:
+        row.state = PLACEMENT_ATTACHED
+        row.panel_email = link.email
+        row.updated_at = now
+
+
+def _stale_placements(
+    placements: list[WhitelistPlacement], server_id: int, inbound_id: int, email: str
+) -> list[WhitelistPlacement]:
+    """Привязки услуги к прежним целям на этом сервере (снимаются после переноса)."""
+    return [
+        row for row in placements
+        if row.server_id == server_id
+        and row.inbound_id != inbound_id
+        and row.panel_email == email
+    ]
+
+
+async def _apply_quota(
+    session: AsyncSession,
+    ctx: _Context,
+    updater: PanelUpdater,
+    spec: ServerProvision,
+    state: QuotaClientState,
+    target: QuotaTarget,
+    now: datetime,
+) -> tuple[QuotaClientState, QuotaTarget]:
+    """Сверка прочитанного после записи и, если квота изменилась, повторная запись.
+
+    Чтение после записи даёт первую точку отсчёта (квота задавалась от нулевой
+    базы), сверку ожидающих событий или новую эпоху счётчика: целевая квота
+    пересчитывается из БД и применяется заново. Изменение статистики панели
+    (сброс, пересоздание строки) не увеличивает доступный объём.
+    """
+    assert ctx.server is not None
+    if state.used_bytes is None:
+        return state, target
+    _settle_reading(session, ctx, state, now)
+    requota = compute_target(ctx.account, ctx.access, now, ctx.events)
+    if requota == target:
+        return state, target
+    reapplied = await updater.apply_quota_client(ctx.server, spec, requota)
+    reapplied.attached_inbound_ids = state.attached_inbound_ids + [
+        i for i in reapplied.attached_inbound_ids if i not in state.attached_inbound_ids
+    ]
+    return reapplied, requota
 
 
 async def _push(
@@ -1072,12 +1329,23 @@ async def _push(
     *,
     refresh: bool = True,
 ) -> SyncOutcome:
-    """Применяет текущее состояние БД на панели (под блокировкой пользователя)."""
+    """Применяет текущее состояние БД на панели (под блокировкой пользователя).
+
+    Квота, срок и enable — абсолютные значения из БД; размещение — текущая цель
+    сервера из БД. Порядок переноса: чтение → намерение прикрепить (commit) →
+    attach и параметры цели с проверкой чтением → снятие прежних привязок услуги
+    (commit до запроса) → подтверждение итогового размещения. Сбой любого шага
+    оставляет состояние для продолжения очередью с backoff; успех переноса
+    (``placement_*``) фиксируется только после подтверждения итога.
+    """
     account = ctx.account
     if not server_ready(ctx.server):
         return SyncOutcome(applied=False, pending=True, skipped="server_not_ready")
     assert ctx.server is not None
+    server = ctx.server
     if ctx.client is None:
+        # Без VPN-клиента применять нечего; backoff не даёт учёту занимать очередь.
+        _defer(account, now)
         return SyncOutcome(applied=False, skipped="no_vpn_client")
     if account.panel_email is None and not (ctx.access.active or ctx.access.lifetime):
         # Клиент ещё не создавался, а доступ не активен — создавать нечего.
@@ -1088,65 +1356,136 @@ async def _push(
         session, ctx.client, public_id
     )
     if account.panel_email not in (None, email) or (
-        account.server_id is not None and account.server_id != ctx.server.id
+        account.server_id is not None and account.server_id != server.id
     ):
         # Сменилась идентичность подписки или сервер услуги: счётчик другой
         # панели не является базой для новой квоты.
         _lose_baseline(ctx, "Сменилась идентичность подписки или сервер услуги")
     account.panel_email = email
     version = account.desired_version
+    inbound = target_inbound(server)
+    assert inbound is not None
+    flow = target_flow(inbound)
+    placements = await _list_placements(session, account.user_id)
+    link = _Link(account.user_id, server.id, inbound.inbound_id, email)
     error: str | None = None
     if refresh:
-        _, error = await _refresh_usage(session, ctx, updater, now)
-    inbound = target_inbound(ctx.server)
-    assert inbound is not None
+        before, error = await _refresh_usage(session, ctx, updater, now)
+        if error is None:
+            _record_attach_intent(session, placements, before, link, now)
+            # Намерение и сверка расхода сохраняются до изменения панели.
+            await session.commit()
     spec = provisioning.build_provision_spec(
         email, sub_id, secret, [inbound], ctx.user.telegram_id
     )
     target = compute_target(account, ctx.access, now, ctx.events)
     try:
-        state = await updater.apply_quota_client(ctx.server, spec, target)
+        state = await updater.apply_quota_client(server, spec, target)
     except PanelUpdateError as exc:
-        error = str(exc)
-        account.sync_attempts += 1
-        account.last_error = error[:1000]
-        account.next_sync_at = now + timedelta(
-            seconds=min(3600, 60 * 2 ** min(account.sync_attempts - 1, 6))
-        )
-        logger.info("whitelist user=%s: применение отложено: %s", ctx.user.id, error)
-        return SyncOutcome(applied=False, pending=True, error=error)
-
-    if state.used_bytes is not None:
-        # Чтение после записи: первая точка отсчёта (квота была задана от
-        # нулевой базы) или сверка ожидающих событий меняют целевую квоту.
-        _settle_reading(session, ctx, state, now)
-        retarget = compute_target(account, ctx.access, now, ctx.events)
-        if retarget != target:
-            try:
-                state = await updater.apply_quota_client(ctx.server, spec, retarget)
-            except PanelUpdateError as exc:
-                account.last_error = str(exc)[:1000]
-                account.next_sync_at = now + timedelta(seconds=60)
-                return SyncOutcome(applied=False, pending=True, error=str(exc))
-            target = retarget
+        _defer(account, now, str(exc))
+        logger.info("whitelist user=%s: применение отложено: %s", ctx.user.id, exc)
+        return SyncOutcome(applied=False, pending=True, error=str(exc))
+    _confirm_attach(session, placements, state, link, now)
+    try:
+        state, target = await _apply_quota(session, ctx, updater, spec, state, target, now)
+    except PanelUpdateError as exc:
+        account.last_error = str(exc)[:1000]
+        account.next_sync_at = now + timedelta(seconds=60)
+        return SyncOutcome(applied=False, pending=True, error=str(exc))
     account.applied_version = max(account.applied_version, version)
     account.applied_total_bytes = target.total_bytes
     account.applied_enable = target.enable
     account.applied_expiry_ms = target.expiry_ms
     account.applied_at = now
+
+    detached: list[int] = []
+    stale = _stale_placements(placements, server.id, inbound.inbound_id, email)
+    for row in [row for row in stale if row.inbound_id not in state.inbound_ids]:
+        # Привязки нет: attach не состоялся, снята раньше или inbound удалён.
+        await session.delete(row)
+        placements.remove(row)
+    present = [row for row in stale if row.inbound_id in state.inbound_ids]
+    if present:
+        for row in present:
+            row.state = PLACEMENT_DETACHING
+            row.updated_at = now
+        # Квота и новая привязка подтверждены — сохраняем их до снятия прежних.
+        await session.commit()
+        detached = sorted(row.inbound_id for row in present)
+        try:
+            after = await updater.detach_quota_client(server, email, detached)
+        except PanelUpdateError as exc:
+            _defer(account, now, f"Перенос: прежняя привязка {detached} не снята: {exc}")
+            logger.warning(
+                "whitelist user=%s: прежние привязки %s не сняты: %s",
+                ctx.user.id, detached, exc,
+            )
+            return SyncOutcome(
+                applied=True, pending=True, error=str(exc), placement_pending=True
+            )
+        for row in present:
+            await session.delete(row)
+            placements.remove(row)
+        if after is None:
+            _defer(account, now, "Перенос: клиент пропал с панели после снятия привязки")
+            return SyncOutcome(applied=True, pending=True, placement_pending=True)
+        try:
+            state, target = await _apply_quota(
+                session, ctx, updater, spec, after, target, now
+            )
+        except PanelUpdateError as exc:
+            _defer(account, now, str(exc))
+            return SyncOutcome(
+                applied=True, pending=True, error=str(exc), placement_pending=True
+            )
+        account.applied_total_bytes = target.total_bytes
+        account.applied_enable = target.enable
+        account.applied_expiry_ms = target.expiry_ms
+
+    owned_left = [
+        row.inbound_id
+        for row in _stale_placements(placements, server.id, inbound.inbound_id, email)
+        if row.inbound_id in state.inbound_ids
+    ]
+    if inbound.inbound_id not in state.inbound_ids or owned_left:
+        _defer(
+            account, now,
+            f"Перенос: размещение не подтверждено (inbound на панели {state.inbound_ids})",
+        )
+        return SyncOutcome(applied=True, pending=True, placement_pending=True)
+    foreign = sorted(set(state.inbound_ids) - {inbound.inbound_id})
+    moved = (
+        account.placement_server_id,
+        account.placement_inbound_id,
+        account.placement_flow,
+    ) != (server.id, inbound.inbound_id, flow)
+    account.placement_server_id = server.id
+    account.placement_inbound_id = inbound.inbound_id
+    account.placement_flow = flow
+    account.placement_at = now
     account.sync_attempts = 0
     account.next_sync_at = None
     account.last_error = None
+    if moved or detached:
+        logger.info(
+            "whitelist user=%s: размещение подтверждено: inbound %s, flow=%s, "
+            "снято %s, прочие привязки %s",
+            ctx.user.id, inbound.inbound_id, flow or "нет", detached, foreign,
+        )
     await audit.record(
         session,
         action="whitelist.panel_applied",
         entity_type="whitelist_account",
         entity_id=account.id,
         payload={
-            "server_id": ctx.server.id,
+            "server_id": server.id,
             "total_bytes": target.total_bytes,
             "enable": target.enable,
             "expiry_ms": target.expiry_ms,
+            "inbound_id": inbound.inbound_id,
+            "flow": flow,
+            "detached": detached,
+            "foreign": foreign,
         },
     )
     return SyncOutcome(applied=True)
@@ -1221,18 +1560,61 @@ async def after_access_change(
     return await _sync_after_commit(session, user_id, updater)
 
 
+def _unplaced(server: Server, inbound: ServerInbound) -> ColumnElement[bool]:
+    """Учёт с клиентом на панели, размещение которого не подтверждено для цели.
+
+    Сравнивается подтверждённое размещение с текущей целью сервера в БД, поэтому
+    смена цели или flow любым путём (выбор inbound, сверка реестра, команды
+    администратора, замена сервера) находится без отдельной пометки, переживает
+    рестарт и не зависит от того, успел ли изменивший цель код поставить очередь.
+    Строки услуги на этом сервере, кроме подтверждённой привязки к цели, — тоже
+    незавершённый перенос (в т. ч. признанные ``/wlclaim``).
+    """
+    open_rows = exists().where(
+        WhitelistPlacement.user_id == WhitelistAccount.user_id,
+        WhitelistPlacement.server_id == server.id,
+        or_(
+            WhitelistPlacement.inbound_id != inbound.inbound_id,
+            WhitelistPlacement.state != PLACEMENT_ATTACHED,
+        ),
+    )
+    return and_(
+        WhitelistAccount.panel_email.is_not(None),
+        or_(
+            WhitelistAccount.placement_server_id.is_distinct_from(server.id),
+            WhitelistAccount.placement_inbound_id.is_distinct_from(inbound.inbound_id),
+            WhitelistAccount.placement_flow.is_distinct_from(target_flow(inbound)),
+            open_rows,
+        ),
+    )
+
+
 async def process_due(
     session: AsyncSession, updater: PanelUpdater, *, limit: int = 50
 ) -> int:
-    """Фоновая очередь: применяет несинхронизированные состояния с backoff."""
+    """Фоновая очередь: применяет несинхронизированные состояния с backoff.
+
+    Кроме изменений учёта (``desired_version``) выбирает учёты, чьё размещение
+    не подтверждено для текущей цели (перенос после смены inbound/flow). Backoff
+    (``next_sync_at``) соблюдается в обоих случаях; применяется всегда текущее
+    состояние БД, поэтому повтор после смены цели 7→8→9 ведёт на 9.
+    """
     server = await get_active_server(session)
     if not server_ready(server):
         return 0
+    assert server is not None
+    inbound = target_inbound(server)
+    assert inbound is not None
     now = _utcnow()
     user_ids = (
         await session.scalars(
             select(WhitelistAccount.user_id)
-            .where(WhitelistAccount.desired_version > WhitelistAccount.applied_version)
+            .where(
+                or_(
+                    WhitelistAccount.desired_version > WhitelistAccount.applied_version,
+                    _unplaced(server, inbound),
+                )
+            )
             .where(
                 (WhitelistAccount.next_sync_at.is_(None))
                 | (WhitelistAccount.next_sync_at <= now)
@@ -1278,10 +1660,20 @@ async def _reconcile_one(
         # Чтение сделано на сервере, который уже не является активным.
         await session.commit()
         return ReconcileOutcome.GONE
-    last = _aware(ctx.account.last_synced_at)
+    last = max(
+        (
+            moment
+            for moment in (
+                _aware(ctx.account.last_synced_at), _aware(ctx.account.usage_observed_at)
+            )
+            if moment is not None
+        ),
+        default=None,
+    )
     if last is not None and last >= read_at:
-        # Чтение устарело: другая операция уже сверила более новый счётчик.
-        # Иначе старое значение было бы ошибочно принято за сброс счётчика.
+        # Чтение устарело: другая операция уже прочитала более новый счётчик (в
+        # том числе пока событие ждёт решения и остатки не сверяются). Иначе
+        # старое значение было бы ошибочно принято за сброс счётчика.
         await session.commit()
         return ReconcileOutcome.BUSY
     if ctx.account.panel_email != state.email or any(
@@ -1299,9 +1691,58 @@ async def _reconcile_one(
     changed = target != _applied_target(ctx.account)
     if changed:
         mark_dirty(ctx.account)
+    drift = placement_drift(
+        ctx.server, state, await _list_placements(session, ctx.account.user_id)
+    )
+    if drift is not None:
+        # Фактическое размещение на панели расходится с целью: подтверждение
+        # снимается, и учёт попадает в очередь переноса. desired_version не
+        # трогается — backoff незавершённого переноса сохраняется.
+        if ctx.account.placement_inbound_id is not None:
+            logger.warning("whitelist user=%s: размещение на панели: %s", user_id, drift)
+        _clear_placement(ctx.account)
+        changed = True
     await release_applied_credits(session, ctx.account)
     await session.commit()
     return ReconcileOutcome.CHANGED if changed else ReconcileOutcome.UNCHANGED
+
+
+def _clear_placement(account: WhitelistAccount) -> None:
+    account.placement_server_id = None
+    account.placement_inbound_id = None
+    account.placement_flow = None
+    account.placement_at = None
+
+
+def placement_drift(
+    server: Server | None,
+    state: QuotaClientState,
+    placements: list[WhitelistPlacement],
+) -> str | None:
+    """Расхождение прочитанного размещения клиента с целью сервера; None — совпадает.
+
+    Проверяется привязка к цели, flow клиента в настройках целевого inbound'а
+    (если панель его вернула) и отсутствие привязок услуги к прежним целям.
+    Чужие привязки (без строки услуги) расхождением не считаются.
+    """
+    inbound = target_inbound(server) if server is not None else None
+    if server is None or inbound is None:
+        return None
+    if inbound.inbound_id not in state.inbound_ids:
+        return f"нет привязки к целевому inbound {inbound.inbound_id} ({state.inbound_ids})"
+    if state.inbound_flows is not None:
+        actual = state.inbound_flows.get(inbound.inbound_id)
+        if actual != target_flow(inbound):
+            shown = "клиента нет в настройках inbound" if actual is None else (actual or "нет")
+            return f"flow на целевом inbound: {shown}, ожидается {target_flow(inbound) or 'нет'}"
+    owned = sorted(
+        row.inbound_id
+        for row in _stale_placements(placements, server.id, inbound.inbound_id, state.email)
+        if row.inbound_id in state.inbound_ids
+    )
+    if owned:
+        return f"не сняты прежние привязки услуги {owned}"
+    return None
 
 
 # --- Фоновая сверка расхода: обход всех учётов пачками ---------------------------
@@ -1329,9 +1770,10 @@ class ReconcileReport:
     reconciled: int = 0
     changed: int = 0  # из reconciled: квоту на панели нужно применить заново
     skipped_no_client: int = 0  # на панели нет клиента
-    skipped_busy: int = 0  # изменились во время обхода и не сверились даже при повторе
+    skipped_busy: int = 0  # изменились во время обхода и повторно прочитанные, но снова заняты
     skipped_gone: int = 0  # учёт удалён или перенесён во время обхода
-    errors: int = 0  # панель не вернула состояние или сверка завершилась ошибкой
+    # Панель не вернула состояние (в т. ч. при повторном чтении) или сверка упала.
+    errors: int = 0
     retried_busy: int = 0  # из reconciled: сверены повторным проходом
     active_seconds: float = 0.0
     cursor: int = 0  # id последнего учёта, до которого дошёл обход
@@ -1354,6 +1796,19 @@ class ReconcileReport:
     def accounts(self) -> int:
         return self.reconciled + self.skipped + self.errors
 
+    @property
+    def unconfirmed(self) -> int:
+        """Учёты, чьё состояние этим обходом не подтверждено.
+
+        Удалённые (``skipped_gone``) не входят: сверять там нечего.
+        """
+        return self.errors + self.skipped_busy + self.skipped_no_client
+
+    @property
+    def confirmed(self) -> bool:
+        """Каждый существующий учёт сверен: ни ошибок, ни пропусков."""
+        return self.unconfirmed == 0
+
 
 @dataclass(slots=True)
 class ReconcileStatus:
@@ -1367,20 +1822,34 @@ class ReconcileStatus:
     last_report: ReconcileReport | None = None
     last_run_at: datetime | None = None
     last_run_note: str | None = None
-    # Обход дошёл до конца (возможны пропуски и ошибки отдельных учётов).
+    # Обход дошёл до конца (возможны пропуски и ошибки отдельных учётов). Это
+    # завершение работы, а не гарантия свежести: см. ``last_success_*``.
     last_complete_at: datetime | None = None
-    # Обход дошёл до конца без ошибок чтения и сверки.
+    last_complete_started_at: datetime | None = None
+    # Подтверждённая свежесть: обход дошёл до конца и каждый учёт сверен — ни ошибок
+    # чтения и сверки, ни неповторённых BUSY, ни учётов без клиента на панели.
+    # Неудачный или неполный обход эти поля не трогает.
     last_success_at: datetime | None = None
     last_success_started_at: datetime | None = None
     traversals_completed: int = 0
     runs_aborted: int = 0
 
+    def complete_age(self, now: datetime) -> timedelta | None:
+        """Сколько прошло с завершения последнего обхода (в т. ч. с пропусками)."""
+        return None if self.last_complete_at is None else now - self.last_complete_at
+
+    def complete_worst_case_staleness(self, now: datetime) -> timedelta | None:
+        """Верхняя граница возраста данных *сверенных* учётов последнего обхода."""
+        if self.last_complete_started_at is None:
+            return None
+        return now - self.last_complete_started_at
+
     def success_age(self, now: datetime) -> timedelta | None:
-        """Сколько прошло с завершения последнего обхода без ошибок."""
+        """Сколько прошло с завершения последнего полностью подтверждённого обхода."""
         return None if self.last_success_at is None else now - self.last_success_at
 
     def worst_case_staleness(self, now: datetime) -> timedelta | None:
-        """Верхняя граница возраста данных учёта после последнего чистого обхода.
+        """Верхняя граница возраста данных всех учётов после последнего подтверждённого обхода.
 
         Учёт мог быть прочитан в самом начале обхода, а не в его конце.
         """
@@ -1530,7 +1999,7 @@ async def _retry_busy(
         report.batches += 1
         result = await _reconcile_batch(session, updater, server, rows, report, retry=True)
         if result.panel_failed:
-            report.skipped_busy += len(rows)
+            report.errors += len(rows)  # повтор не прочитан: учёты по-прежнему не сверены
     report.retried_busy = report.reconciled - before
 
 
@@ -1557,20 +2026,22 @@ async def _finish_reconcile(
     report.finished_at = now
     status.last_report = report
     status.last_complete_at = now
+    status.last_complete_started_at = report.started_at
     status.last_run_note = "обход завершён"
     status.traversals_completed += 1
-    if report.errors == 0:
+    if report.confirmed:
         status.last_success_at = now
         status.last_success_started_at = report.started_at
     status.current = None
-    log = logger.warning if report.errors else logger.info
+    log = logger.info if report.confirmed else logger.warning
     log(
         "whitelist: сверка расхода завершена за %.1f с (активно %.1f с), пачек %s, "
         "сверено %s (повторно %s, требуют применения %s), пропущено %s "
-        "(нет клиента %s, изменились %s, удалены %s), ошибок %s",
+        "(нет клиента %s, изменились %s, удалены %s), ошибок %s, не подтверждено %s",
         (now - report.started_at).total_seconds(), report.active_seconds, report.batches,
         report.reconciled, report.retried_busy, report.changed, report.skipped,
         report.skipped_no_client, report.skipped_busy, report.skipped_gone, report.errors,
+        report.unconfirmed,
     )
 
 
@@ -1947,7 +2418,11 @@ async def resolve_uncertain(
     """Решение администратора: неразделённый расход до или после события.
 
     Применяет первое неопределённое событие с выбранной привязкой (граница
-    прочитанного периода), затем продолжает обычную сверку по порядку.
+    прочитанного периода), затем продолжает обычную сверку по порядку. После
+    сброса счётчика границы уже пересчитаны в текущую эпоху (``_start_epoch``);
+    период, прочитанный на утраченном счётчике, решается только корректировкой.
+    Сверка после решения читает счётчик заново: необнаруженный ещё сброс
+    начнёт новую эпоху до применения квоты.
     """
     if choice not in (RESOLVE_BEFORE, RESOLVE_AFTER):
         raise WhitelistError("Укажите, куда отнести расход: до или после события")
@@ -2083,7 +2558,7 @@ async def user_overview(
             for event in events
         ]
         overview.uncertain = any(event.status == EVENT_UNCERTAIN for event in events)
-        remaining = sum(provisional_balances(account, events))
+        remaining = quota_room(account, events)
     overview.stale = stale
     if access.lifetime:
         overview.status = STATUS_LIFETIME
@@ -2323,6 +2798,179 @@ async def run_rollout(
 
 
 @dataclass(slots=True)
+class PlacementProgress:
+    """Перенос клиентов на текущую цель whitelist-сервера.
+
+    Учитываются учёты с клиентом на панели (``panel_email``). «Подтверждено» —
+    чтением подтверждены привязка к цели с её flow и снятие прежних привязок
+    услуги; «ошибка» — неподтверждённые с ошибкой последней попытки; «ожидает» —
+    остальные неподтверждённые (очередь, backoff, сервер не готов). Готовность
+    inbound'а не означает, что перенос пользователей завершён.
+    """
+
+    server_id: int
+    inbound_id: int
+    flow: str
+    total: int = 0
+    placed: int = 0
+    pending: int = 0
+    failed: int = 0
+    # Строки привязок услуги к прежним целям, ещё не снятые на панели.
+    stale_links: int = 0
+
+    @property
+    def complete(self) -> bool:
+        return self.pending == 0 and self.failed == 0
+
+
+async def placement_progress(
+    session: AsyncSession, server: Server | None = None
+) -> PlacementProgress | None:
+    """Прогресс переноса на текущую цель; None — сервер услуги без единой цели."""
+    if server is None:
+        server = await get_active_server(session)
+    inbound = target_inbound(server) if server is not None else None
+    if server is None or inbound is None:
+        return None
+    unplaced = _unplaced(server, inbound)
+    with_client = WhitelistAccount.panel_email.is_not(None)
+
+    async def count(*conditions: ColumnElement[bool]) -> int:
+        return await session.scalar(
+            select(func.count(WhitelistAccount.id)).where(with_client, *conditions)
+        ) or 0
+
+    progress = PlacementProgress(
+        server_id=server.id, inbound_id=inbound.inbound_id, flow=target_flow(inbound)
+    )
+    progress.total = await count()
+    progress.failed = await count(unplaced, WhitelistAccount.last_error.is_not(None))
+    progress.pending = await count(unplaced, WhitelistAccount.last_error.is_(None))
+    progress.placed = progress.total - progress.failed - progress.pending
+    progress.stale_links = await session.scalar(
+        select(func.count(WhitelistPlacement.id)).where(
+            WhitelistPlacement.server_id == server.id,
+            WhitelistPlacement.inbound_id != inbound.inbound_id,
+        )
+    ) or 0
+    return progress
+
+
+async def claim_inbound(
+    session: AsyncSession,
+    inbound_id: int,
+    *,
+    actor_user_id: int | None,
+    reason: str,
+) -> int:
+    """Администратор признаёт привязки клиентов услуги к inbound'у привязками услуги.
+
+    Для учётов, перенесённых до учёта привязок (миграция ``a4b5c6d7e8f9``), или
+    после ручного вмешательства на панели происхождение прежней привязки
+    неизвестно, и услуга её не снимает. Решение администратора (в аудите)
+    создаёт строки ``claimed``: очередь снимет такие привязки, если они есть на
+    панели, после подтверждения текущей цели. Текущую цель признать нельзя.
+    Возвращает число новых строк.
+    """
+    server = await get_active_server(session)
+    if server is None:
+        raise WhitelistError("Нет включённого сервера услуги")
+    inbound = target_inbound(server)
+    if inbound is not None and inbound.inbound_id == inbound_id:
+        raise WhitelistError(f"Inbound {inbound_id} — текущая цель услуги")
+    accounts = (
+        await session.scalars(
+            select(WhitelistAccount).where(
+                WhitelistAccount.panel_email.is_not(None),
+                or_(
+                    WhitelistAccount.server_id == server.id,
+                    WhitelistAccount.placement_server_id == server.id,
+                ),
+            )
+        )
+    ).all()
+    existing = set(
+        (
+            await session.scalars(
+                select(WhitelistPlacement.user_id).where(
+                    WhitelistPlacement.server_id == server.id,
+                    WhitelistPlacement.inbound_id == inbound_id,
+                )
+            )
+        ).all()
+    )
+    now = _utcnow()
+    created = 0
+    for account in accounts:
+        if account.user_id in existing or account.panel_email is None:
+            continue
+        session.add(
+            WhitelistPlacement(
+                user_id=account.user_id, server_id=server.id, inbound_id=inbound_id,
+                panel_email=account.panel_email, state=PLACEMENT_ATTACHED,
+                origin=PLACEMENT_ORIGIN_CLAIMED, created_at=now,
+            )
+        )
+        created += 1
+    await audit.record(
+        session,
+        action="whitelist.placement_claimed",
+        actor_user_id=actor_user_id,
+        entity_type="server",
+        entity_id=server.id,
+        payload={"inbound_id": inbound_id, "accounts": created, "reason": reason[:500]},
+    )
+    await session.commit()
+    return created
+
+
+@dataclass(slots=True)
+class UserPlacement:
+    """Размещение клиента пользователя для карточки администратора."""
+
+    target_inbound_id: int | None
+    target_flow: str | None
+    confirmed: bool
+    inbound_id: int | None
+    flow: str | None
+    confirmed_at: datetime | None
+    # Привязки, созданные услугой: (inbound, состояние, происхождение).
+    links: list[tuple[int, str, str]] = field(default_factory=list)
+
+
+async def user_placement(session: AsyncSession, user_id: int) -> UserPlacement | None:
+    account = await get_account(session, user_id)
+    if account is None or account.panel_email is None:
+        return None
+    server = await get_active_server(session)
+    inbound = target_inbound(server) if server is not None else None
+    links = [
+        (row.inbound_id, row.state, row.origin)
+        for row in await _list_placements(session, user_id)
+        if server is not None and row.server_id == server.id
+    ]
+    confirmed = (
+        server is not None
+        and inbound is not None
+        and (account.placement_server_id, account.placement_inbound_id, account.placement_flow)
+        == (server.id, inbound.inbound_id, target_flow(inbound))
+        and all(
+            inbound_id == inbound.inbound_id and state == PLACEMENT_ATTACHED
+            for inbound_id, state, _ in links
+        )
+    )
+    return UserPlacement(
+        target_inbound_id=inbound.inbound_id if inbound is not None else None,
+        target_flow=target_flow(inbound) if inbound is not None else None,
+        confirmed=confirmed,
+        inbound_id=account.placement_inbound_id,
+        flow=account.placement_flow,
+        confirmed_at=_aware(account.placement_at),
+        links=links,
+    )
+
+
+@dataclass(slots=True)
 class AdminSummary:
     accounts: int
     pending: int
@@ -2333,6 +2981,7 @@ class AdminSummary:
     unsettled: int = 0
     uncertain: int = 0
     reconcile: ReconcileStatus | None = None
+    placement: PlacementProgress | None = None
 
 
 async def admin_summary(session: AsyncSession) -> AdminSummary:
@@ -2359,6 +3008,7 @@ async def admin_summary(session: AsyncSession) -> AdminSummary:
             result.unsettled = users
         else:
             result.uncertain = users
+    result.placement = await placement_progress(session)
     return result
 
 
@@ -2392,3 +3042,7 @@ async def forget_panel_client(session: AsyncSession, user_id: int) -> None:
     account.applied_enable = None
     account.applied_expiry_ms = None
     account.applied_version = account.desired_version
+    # Клиент удалён со всеми привязками: размещать и снимать больше нечего.
+    _clear_placement(account)
+    for row in await _list_placements(session, user_id):
+        await session.delete(row)

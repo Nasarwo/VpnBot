@@ -56,20 +56,29 @@ async def _anti_sharing_poller(settings: Settings) -> None:
             logger.exception("Ошибка фонового сбора IP")
 
 
+async def _subhub_sync(settings: Settings, reason: str) -> bool:
+    """Best-effort запрос SubHub перечитать панели после фоновых изменений."""
+    logger.info("SubHub: запрос синхронизации после фоновых изменений (%s)", reason)
+    return await trigger_configured_sync(
+        settings.subhub_url,
+        settings.subhub_admin_token,
+        timeout=settings.subhub_timeout_seconds,
+    )
+
+
 async def _server_health_poller(settings: Settings) -> None:
-    """Фоновая периодическая проверка доступности серверов 3x-ui."""
+    """Фоновая периодическая проверка доступности серверов 3x-ui.
+
+    Очередь применения whitelist-квот здесь не обслуживается: её ведёт
+    ``_whitelist_queue_worker``, который работает и при отключённой проверке.
+    """
     interval = settings.server_health_poll_seconds
     timeout = min(float(settings.xui_request_timeout), 10.0)
     updater = build_updater(timeout=float(settings.xui_request_timeout))
     sessionmaker = get_sessionmaker()
 
     async def subhub_sync(reason: str) -> bool:
-        logger.info("SubHub: запрос синхронизации после фоновых изменений (%s)", reason)
-        return await trigger_configured_sync(
-            settings.subhub_url,
-            settings.subhub_admin_token,
-            timeout=settings.subhub_timeout_seconds,
-        )
+        return await _subhub_sync(settings, reason)
 
     async def pending_applied() -> bool:
         return await subhub_sync("отложенные обновления серверов")
@@ -89,10 +98,28 @@ async def _server_health_poller(settings: Settings) -> None:
                 )
         except Exception:  # noqa: BLE001 - фоновая задача не должна падать
             logger.exception("Ошибка фоновой проверки серверов")
+        await asyncio.sleep(interval)
+
+
+async def _whitelist_queue_worker(settings: Settings) -> None:
+    """Очередь применения квот «Обхода белых списков» на панели.
+
+    Единственный обработчик ``whitelist.process_due`` в процессе. Не зависит от
+    ``SERVER_HEALTH_POLL_SECONDS`` и сверки расхода: покупка, сохранённая при
+    недоступной панели, применяется после её восстановления без команд
+    администратора. Повторы по аккаунту, сериализацию по пользователю и
+    идемпотентность обеспечивает сама очередь; здесь — только периодический
+    запуск и уведомление SubHub после успешного применения.
+    """
+    interval = settings.whitelist_queue_poll_seconds
+    updater = build_updater(timeout=float(settings.xui_request_timeout))
+    sessionmaker = get_sessionmaker()
+    while True:
         try:
             async with sessionmaker() as session:
-                if await whitelist.process_due(session, updater):
-                    await subhub_sync("очередь «Обход белых списков»")
+                applied = await whitelist.process_due(session, updater)
+            if applied:
+                await _subhub_sync(settings, "очередь «Обход белых списков»")
         except Exception:  # noqa: BLE001 - фоновая задача не должна падать
             logger.exception("Ошибка фоновой синхронизации «Обход белых списков»")
         await asyncio.sleep(interval)
@@ -145,6 +172,14 @@ async def _expiry_notify_poller(bot: Bot, settings: Settings) -> None:
         await asyncio.sleep(interval)
 
 
+# Задачи worker'а очереди этого процесса: защита от второго запуска.
+_QUEUE_WORKER_TASKS: set[asyncio.Task] = set()
+
+
+def _queue_worker_alive() -> bool:
+    return any(not task.done() for task in _QUEUE_WORKER_TASKS)
+
+
 def start_background_tasks(bot: Bot, settings: Settings) -> list[asyncio.Task]:
     """Запускает фоновые циклы процесса бота (кроме доставки сайта).
 
@@ -158,6 +193,18 @@ def start_background_tasks(bot: Bot, settings: Settings) -> list[asyncio.Task]:
         logger.info(
             "Антишеринг-мониторинг включён, период сбора: %s мин",
             settings.anti_sharing_poll_minutes,
+        )
+    # Один worker очереди на процесс, независимо от проверки серверов и сверки.
+    if _queue_worker_alive():
+        logger.warning("Очередь «Обход белых списков» уже обслуживается в этом процессе")
+    else:
+        worker = asyncio.create_task(_whitelist_queue_worker(settings))
+        _QUEUE_WORKER_TASKS.add(worker)
+        worker.add_done_callback(_QUEUE_WORKER_TASKS.discard)
+        tasks.append(worker)
+        logger.info(
+            "Очередь «Обход белых списков» включена, период опроса: %s c",
+            settings.whitelist_queue_poll_seconds,
         )
     if settings.server_health_poll_seconds > 0:
         tasks.append(asyncio.create_task(_server_health_poller(settings)))

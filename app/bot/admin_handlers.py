@@ -1432,9 +1432,40 @@ async def set_subscription_url(
     )
 
 
+async def _whitelist_inbounds_edited(
+    session: AsyncSession, server_id: int, command: str, actor_user_id: int | None
+) -> str:
+    """Ручное изменение inbound'ов сервера услуги снимает его готовность.
+
+    Цель или её flow могли измениться без проверки совместимости с SubHub:
+    до «Синхронизировать сервер» выдача и перенос клиентов не обращаются к панели.
+    После синхронизации очередь сама перенесёт клиентов на новую цель/flow.
+    """
+    server = await session.get(Server, server_id)
+    if server is None or server.purpose != SERVER_PURPOSE_WHITELIST:
+        return ""
+    server.inventory_status = None
+    server.inventory_error = (
+        f"Inbound'ы изменены командой /{command}: синхронизируйте сервер в разделе услуги"
+    )
+    await audit.record(
+        session,
+        action="whitelist.inbounds_edited",
+        actor_user_id=actor_user_id,
+        entity_type="server",
+        entity_id=server_id,
+        payload={"command": command},
+    )
+    return (
+        "\n\nСервер «Обход белых списков» не готов до синхронизации: /admin → "
+        "«Обход белых списков» → «Синхронизировать сервер». После неё клиенты будут "
+        "перенесены на целевой inbound (прогресс — в разделе услуги)."
+    )
+
+
 @router.message(Command("addinbound"))
 async def add_inbound(
-    message: Message, command: CommandObject, session: AsyncSession
+    message: Message, command: CommandObject, session: AsyncSession, db_user: User
 ) -> None:
     args = (command.args or "").split()
     if len(args) < 3:
@@ -1473,16 +1504,18 @@ async def add_inbound(
         enabled=True,
     )
     session.add(inbound)
+    await session.flush()
+    note = await _whitelist_inbounds_edited(session, server_id, "addinbound", db_user.id)
     await session.commit()
     await message.answer(
         f"Inbound добавлен на сервер #{server_id}: id={inbound_id} "
-        f"{protocol.value}"
+        f"{protocol.value}" + note
     )
 
 
 @router.message(Command("delinbound"))
 async def del_inbound(
-    message: Message, command: CommandObject, session: AsyncSession
+    message: Message, command: CommandObject, session: AsyncSession, db_user: User
 ) -> None:
     args = (command.args or "").split()
     if len(args) < 2:
@@ -1509,6 +1542,7 @@ async def del_inbound(
             f"На сервере #{server_id} нет настроенного inbound {inbound_id}."
         )
         return
+    note = await _whitelist_inbounds_edited(session, server_id, "delinbound", db_user.id)
     await session.commit()
     logger.info(
         "Админ tg=%s удалил inbound %s сервера #%s (записей: %s)",
@@ -1519,13 +1553,13 @@ async def del_inbound(
     )
     await message.answer(
         f"Inbound {inbound_id} удалён из настроек сервера #{server_id}. "
-        "Новым клиентам он больше не выдаётся."
+        "Новым клиентам он больше не выдаётся." + note
     )
 
 
 @router.message(Command("clearinbounds"))
 async def clear_inbounds(
-    message: Message, command: CommandObject, session: AsyncSession
+    message: Message, command: CommandObject, session: AsyncSession, db_user: User
 ) -> None:
     args = (command.args or "").split()
     if not args:
@@ -1541,6 +1575,7 @@ async def clear_inbounds(
         await message.answer("Сервер не найден")
         return
     deleted = await repo.clear_inbounds(server_id)
+    note = await _whitelist_inbounds_edited(session, server_id, "clearinbounds", db_user.id)
     await session.commit()
     logger.info(
         "Админ tg=%s очистил inbound'ы сервера #%s (записей: %s)",
@@ -1549,7 +1584,7 @@ async def clear_inbounds(
         deleted,
     )
     await message.answer(
-        f"Удалено настроенных inbound'ов: {deleted} (сервер #{server_id})."
+        f"Удалено настроенных inbound'ов: {deleted} (сервер #{server_id})." + note
     )
 
 
@@ -1991,7 +2026,14 @@ async def whitelist_admin(
                 return
             alert = texts.admin_whitelist_inventory(result)
         if whitelist.server_ready(await whitelist.get_active_server(session)):
-            await whitelist.process_due(session, updater)
+            # Перенос клиентов на (новую) цель: первая порция сразу, остальное —
+            # worker очереди. Прогресс показывает раздел услуги.
+            if await whitelist.process_due(session, updater):
+                await trigger_configured_sync(
+                    settings.subhub_url,
+                    settings.subhub_admin_token,
+                    timeout=settings.subhub_timeout_seconds,
+                )
         text, markup = await _whitelist_home(session)
         await _edit_panel(callback, text, markup, alert=alert[:190])
         return
@@ -2177,8 +2219,9 @@ async def _whitelist_user_card(
     account = await whitelist.get_account(session, target.id)
     events = await whitelist.list_open_events(session, target.id)
     outcomes = whitelist.uncertain_outcomes(account, events) if account else None
+    placement = await whitelist.user_placement(session, target.id)
     await session.commit()
-    text = texts.admin_whitelist_user(target, account, overview, events, outcomes)
+    text = texts.admin_whitelist_user(target, account, overview, events, outcomes, placement)
     markup = keyboards.admin_whitelist_user_keyboard(
         target.id, bool(account and account.admin_blocked)
     )
@@ -2308,3 +2351,38 @@ async def whitelist_resolve_cmd(
     text, markup = await _whitelist_user_card(session, target, None)
     status = "Применено на сервере." if outcome.applied else "Сохранено; применение ожидается."
     await message.answer(f"{status}\n\n{text}", reply_markup=markup)
+
+
+@router.message(Command("wlclaim"))
+async def whitelist_claim_cmd(
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    db_user: User,
+) -> None:
+    """Признать привязки к прежнему inbound'у привязками услуги (их снимет перенос)."""
+    parts = (command.args or "").split(maxsplit=1)
+    usage = (
+        "Использование: /wlclaim <inbound_id> <причина>\n"
+        "Привязки клиентов услуги к этому inbound'у на whitelist-панели будут считаться "
+        "созданными услугой: после подтверждения текущей цели очередь снимет их. "
+        "Используйте, только если inbound служил целью услуги и других клиентов "
+        "этой подписки на нём быть не должно (например, учёты до учёта привязок)."
+    )
+    if len(parts) < 2 or not parts[0].isdigit():
+        await message.answer(usage)
+        return
+    try:
+        created = await whitelist.claim_inbound(
+            session, int(parts[0]), actor_user_id=db_user.id, reason=parts[1]
+        )
+    except whitelist.WhitelistError as exc:
+        await session.rollback()
+        await message.answer(f"Не изменено: {exc}")
+        return
+    progress = await whitelist.placement_progress(session)
+    await session.commit()
+    await message.answer(
+        f"Признано привязок к inbound {parts[0]}: {created}. Их снимет фоновая очередь.\n"
+        + "\n".join(texts.placement_progress_lines(progress))
+    )

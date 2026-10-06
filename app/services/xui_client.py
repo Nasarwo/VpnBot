@@ -723,6 +723,25 @@ class XuiClient:
         if not data.get("success", False):
             raise XuiError(f"Панель не подтвердила привязку клиента {email}: {data.get('msg')}")
 
+    async def detach_client_record(self, email: str, inbound_ids: list[int]) -> None:
+        """Снимает привязки глобального клиента к inbound'ам (3x-ui >= 3.2).
+
+        ``POST /panel/api/clients/{email}/detach`` с ``{"inboundIds": [...]}``:
+        непривязанные id пропускаются, строка статистики сохраняется (keepTraffic).
+        Клиент, включённый на локальном inbound'е, удаляется из Xray через API; в
+        3.9 при ``restartXrayOnClientDisable`` (по умолчанию) панель затем
+        перезапускает Xray (≤ 30 с) — с потерей учёта трафика D-3.
+        """
+        if not inbound_ids:
+            return
+        path = f"/panel/api/clients/{_quote_path_segment(email)}/detach"
+        response = await self._api("POST", path, json={"inboundIds": inbound_ids})
+        data = self._parse_json(response)
+        if not data.get("success", False):
+            raise XuiError(
+                f"Панель не подтвердила снятие привязки клиента {email}: {data.get('msg')}"
+            )
+
     # --- Трафик / IP --------------------------------------------------------
 
     async def get_client_usage(self, email: str) -> dict[str, Any] | None:

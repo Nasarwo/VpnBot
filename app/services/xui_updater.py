@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+from typing import Any
 
 from app.db.models import ClientServerMapping, Server
 from app.services.panel_updater import (
@@ -250,33 +252,58 @@ class XuiPanelUpdater:
     async def read_quota_clients(
         self, server: Server, emails: list[str]
     ) -> dict[str, QuotaClientState | None | PanelUpdateError]:
-        """Сверка расхода пачкой в одной сессии панели (фоновая проверка)."""
+        """Сверка расхода пачкой в одной сессии панели (фоновая проверка).
+
+        Список inbound'ов читается один раз на пачку: по нему для каждого клиента
+        заполняется flow в его привязках (сверка размещения). Если список не
+        прочитался, flow неизвестен (None), расход сверяется как обычно.
+        """
         result: dict[str, QuotaClientState | None | PanelUpdateError] = {}
         async with self._client(server) as client:
             try:
                 await self._require_clients_api(client, server)
             except XuiError as exc:
                 return {email: PanelUpdateError(str(exc)) for email in emails}
+            try:
+                inbounds: dict[int, dict[str, Any]] | None = {
+                    item["id"]: item for item in await client.list_inbounds()
+                }
+            except XuiError as exc:
+                logger.info("Пакетное чтение: список inbound'ов не прочитан: %s", exc)
+                inbounds = None
             for email in emails:
                 try:
-                    result[email] = await self._read_quota_state(client, email)
+                    state = await self._read_quota_state(client, email)
                 except XuiError as exc:
                     result[email] = PanelUpdateError(str(exc))
+                    continue
+                if state is not None and inbounds is not None:
+                    state.inbound_flows = _client_flows(inbounds, state)
+                result[email] = state
         return result
 
     async def apply_quota_client(
         self, server: Server, spec: ServerProvision, target: QuotaTarget
     ) -> QuotaClientState:
-        """Задаёт абсолютные totalGB/enable/expiry и проверяет их чтением.
+        """Задаёт абсолютные totalGB/enable/expiry и размещение; проверяет чтением.
 
         Повтор с тем же ``target`` идемпотентен: квота не прибавляется, а
         выставляется заново. Секреты, Telegram ID, subId и дополнительные поля
         существующего клиента сохраняются (read-modify-write).
+
+        Порядок (3x-ui 3.2–3.9, ``ClientService.Attach/Update``): недостающие целевые
+        inbound'ы прикрепляются (attach копирует общую запись и не трогает счётчик),
+        затем ``clients/update`` с фильтром ``inboundIds`` применяет параметры:
+        сначала к прочим привязкам с их собственным flow, последним — к цели с её
+        явным flow (``None`` — без flow). 3.2.0 фильтр игнорирует и пишет flow тела
+        во все привязки — последним остаётся flow цели. Прочие привязки не
+        снимаются. Проверка: квота, срок, enable, привязка к цели и flow клиента в
+        настройках целевого inbound'а (по ним строят конфиг Xray и ссылку SubHub).
         """
         if target.total_bytes < 0:
             raise PanelUpdateError("Отрицательная квота трафика")
         inbound_ids = [i.inbound_id for i in spec.inbounds]
-        flow = next((i.flow for i in spec.inbounds if i.flow), None)
+        target_flows = {i.inbound_id: i.flow or "" for i in spec.inbounds}
         async with self._client(server) as client:
             try:
                 live = {item["id"]: item for item in await client.list_inbounds()}
@@ -291,6 +318,8 @@ class XuiPanelUpdater:
                     )
                 await self._require_clients_api(client, server)
                 record = await client.get_client_record(spec.email)
+                attached: list[int] = []
+                plan: dict[str, list[int]] = {}
                 if record is None:
                     client_obj = build_client_record(
                         client_uuid=spec.client_uuid,
@@ -298,7 +327,7 @@ class XuiPanelUpdater:
                         email=spec.email,
                         sub_id=spec.sub_id,
                         expiry_ms=target.expiry_ms,
-                        flow=flow,
+                        flow=next((f for f in target_flows.values() if f), None),
                         total_gb=target.total_bytes,
                         tg_id=spec.telegram_id or 0,
                         enable=target.enable,
@@ -306,6 +335,7 @@ class XuiPanelUpdater:
                     )
                     await client.create_client_record(client_obj, inbound_ids)
                     panel_email = spec.email
+                    attached = sorted(inbound_ids)
                 else:
                     body = client_record_body(record)
                     if body is None:
@@ -313,35 +343,96 @@ class XuiPanelUpdater:
                             f"Некорректный ответ панели для клиента {spec.email}"
                         )
                     panel_email = str(body.get("email") or spec.email)
-                    client_obj = merge_client_record_for_update(
-                        body,
-                        email=panel_email,
-                        sub_id=spec.sub_id,
-                        expiry_ms=target.expiry_ms,
-                        enable=target.enable,
-                        flow=flow,
-                        tg_id=spec.telegram_id,
-                        total_bytes=target.total_bytes,
-                        quota_policy=True,
-                    )
                     current = [
                         int(i) for i in (record.get("inboundIds") or [])
                         if type(i) is int and i in live
                     ]
-                    await client.update_client_record(
-                        panel_email, client_obj,
-                        inbound_ids=sorted(set(current) | set(inbound_ids)),
-                    )
                     missing = sorted(set(inbound_ids) - set(current))
                     if missing:
                         await client.attach_client_record(panel_email, missing)
+                        attached = missing
+                    # Прочие привязки (прежняя цель услуги, чужие) сохраняют свой flow.
+                    for other in sorted(set(current) - set(inbound_ids)):
+                        own = _inbound_client_flow(live[other], panel_email)
+                        flow = str(body.get("flow") or "") if own is None else own
+                        plan.setdefault(flow, []).append(other)
+                    target_plan: dict[str, list[int]] = {}
+                    for inbound_id in inbound_ids:
+                        target_plan.setdefault(target_flows[inbound_id], []).append(inbound_id)
+                    for flow, ids in [*plan.items(), *target_plan.items()]:
+                        client_obj = merge_client_record_for_update(
+                            body,
+                            email=panel_email,
+                            sub_id=spec.sub_id,
+                            expiry_ms=target.expiry_ms,
+                            enable=target.enable,
+                            flow=flow,
+                            tg_id=spec.telegram_id,
+                            total_bytes=target.total_bytes,
+                            quota_policy=True,
+                            explicit_flow=True,
+                        )
+                        await client.update_client_record(
+                            panel_email, client_obj, inbound_ids=sorted(ids)
+                        )
                 state = await self._read_quota_state(client, panel_email)
                 _verify_quota_state(panel_email, state, target, inbound_ids)
                 assert state is not None
+                flows: dict[int, str | None] = {
+                    inbound_id: _inbound_client_flow(
+                        await client.get_inbound(inbound_id), panel_email
+                    )
+                    for inbound_id in inbound_ids
+                }
+                _verify_quota_state(
+                    panel_email, state, target, inbound_ids,
+                    flows=flows, expected_flows=target_flows,
+                )
+                for flow, ids in plan.items():
+                    for other in ids:
+                        flows[other] = await _other_flow(client, server, panel_email, other, flow)
+                state.inbound_flows = {k: v for k, v in flows.items() if v is not None}
+                state.attached_inbound_ids = attached
                 return state
             except XuiError as exc:
                 logger.warning(
                     "Ошибка применения квоты на сервере %s: %s", server.id, exc
+                )
+                raise PanelUpdateError(str(exc)) from exc
+
+    async def detach_quota_client(
+        self, server: Server, email: str, inbound_ids: list[int]
+    ) -> QuotaClientState | None:
+        """Снимает привязки клиента к ``inbound_ids`` и подтверждает это чтением.
+
+        ``POST clients/{email}/detach`` (3x-ui 3.2–3.9, ``DetachByEmailMany``):
+        отправляются только реально привязанные id; строка статистики остаётся.
+        """
+        async with self._client(server) as client:
+            try:
+                await self._require_clients_api(client, server)
+                record = await client.get_client_record(email)
+                if record is None:
+                    return None
+                body = client_record_body(record)
+                panel_email = str((body or {}).get("email") or email)
+                current = {
+                    int(i) for i in (record.get("inboundIds") or []) if type(i) is int
+                }
+                present = sorted(set(inbound_ids) & current)
+                if present:
+                    await client.detach_client_record(panel_email, present)
+                state = await self._read_quota_state(client, panel_email)
+                left = sorted(set(inbound_ids) & set(state.inbound_ids if state else []))
+                if left:
+                    raise XuiError(
+                        f"Панель не подтвердила снятие привязок клиента {panel_email}: "
+                        f"остались inbound {left}"
+                    )
+                return state
+            except XuiError as exc:
+                logger.warning(
+                    "Ошибка снятия привязки на сервере %s: %s", server.id, exc
                 )
                 raise PanelUpdateError(str(exc)) from exc
 
@@ -468,11 +559,67 @@ class XuiPanelUpdater:
                 )
 
 
+def _inbound_client_flow(inbound: dict[str, Any] | None, email: str) -> str | None:
+    """flow клиента в ``settings.clients[]`` inbound'а; None — клиента там нет."""
+    if not isinstance(inbound, dict):
+        return None
+    raw = inbound.get("settings")
+    if isinstance(raw, str):
+        try:
+            settings = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return None
+    else:
+        settings = raw if isinstance(raw, dict) else {}
+    clients = settings.get("clients") if isinstance(settings, dict) else None
+    for item in clients if isinstance(clients, list) else []:
+        if isinstance(item, dict) and item.get("email") == email:
+            return str(item.get("flow") or "")
+    return None
+
+
+async def _other_flow(
+    client: XuiClient, server: Server, email: str, inbound_id: int, expected: str
+) -> str | None:
+    """flow прочей привязки после обновления (best-effort, для наблюдения).
+
+    В 3x-ui 3.2.0 ``clients/update`` не принимает фильтр inbound'ов и пишет flow тела
+    во все привязки общей записи клиента: flow чужой или прежней привязки может
+    измениться. Изменение не отменяется (это контракт панели), а пишется в журнал.
+    """
+    try:
+        actual = _inbound_client_flow(await client.get_inbound(inbound_id), email)
+    except XuiError as exc:
+        logger.info("flow привязки %s клиента %s не прочитан: %s", inbound_id, email, exc)
+        return None
+    if actual is not None and actual != expected:
+        logger.warning(
+            "Сервер %s: flow привязки клиента %s к inbound %s изменился (%s → %s): "
+            "панель применила обновление общей записи ко всем привязкам",
+            server.id, email, inbound_id, expected or "нет", actual or "нет",
+        )
+    return actual
+
+
+def _client_flows(
+    inbounds: dict[int, dict[str, Any]], state: QuotaClientState
+) -> dict[int, str]:
+    flows: dict[int, str] = {}
+    for inbound_id in state.inbound_ids:
+        flow = _inbound_client_flow(inbounds.get(inbound_id), state.email)
+        if flow is not None:
+            flows[inbound_id] = flow
+    return flows
+
+
 def _verify_quota_state(
     email: str,
     state: QuotaClientState | None,
     target: QuotaTarget,
     inbound_ids: list[int],
+    *,
+    flows: dict[int, str | None] | None = None,
+    expected_flows: dict[int, str] | None = None,
 ) -> None:
     """Read-after-write: панель должна хранить ровно заданные значения."""
     if state is None:
@@ -484,6 +631,14 @@ def _verify_quota_state(
         problems.append(f"expiryTime={state.expiry_ms}, ожидалось {target.expiry_ms}")
     if not set(inbound_ids).issubset(state.inbound_ids):
         problems.append(f"inbound={state.inbound_ids}, ожидалось {inbound_ids}")
+    for inbound_id, expected in (expected_flows or {}).items():
+        actual = (flows or {}).get(inbound_id)
+        if actual is None:
+            problems.append(f"клиента нет в настройках inbound {inbound_id}")
+        elif actual != expected:
+            problems.append(
+                f"flow в inbound {inbound_id}={actual or 'нет'}, ожидалось {expected or 'нет'}"
+            )
     # Включение подтверждается, если панель не отключила клиента по исчерпанию
     # квоты в промежутке между записью и чтением.
     if target.enable and not state.enable and not state.depleted:

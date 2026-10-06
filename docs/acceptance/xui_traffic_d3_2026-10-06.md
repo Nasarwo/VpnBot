@@ -1,6 +1,8 @@
 # Протокол: D-3 — учёт трафика 3x-ui после запуска панели и перезапусков Xray — 6 октября 2026
 
-Сценарий `ops/acceptance/xui_traffic_d3.py` (анализ — `docs/WHITELIST_ACCEPTANCE.md` §17).
+Сценарий `ops/acceptance/xui_traffic_d3.py` (сводка и регламент — `docs/WHITELIST_SERVICE.md`
+§9 «D-3» и §6 шаг 9; дефект — `docs/WHITELIST_ACCEPTANCE.md` §8 «D-3». Прежняя ссылка на
+`WHITELIST_ACCEPTANCE.md` §17 устарела: этот номер занят разделом о worker очереди).
 Собственный изолированный стенд сценария: Docker-сеть `d3acc-net`, файловый сервер
 (nginx: HTTP-файлы 8 и 32 МиБ, TLS 1.3 цель REALITY) и **для каждого сценария новый
 контейнер** тестовой панели 3x-ui, порт только `127.0.0.1:52153`. Бот, PostgreSQL, SubHub,

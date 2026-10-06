@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol as TypingProtocol
 
@@ -88,6 +88,12 @@ class QuotaClientState:
     # client_traffics.last_online (мс, часы панели): панель обновляет его при
     # каждом ненулевом приросте up/down. None/0 — неизвестно.
     last_online_ms: int | None = None
+    # flow клиента в настройках inbound'ов (settings.clients[] — по ним строят
+    # конфиг Xray и ссылку SubHub). None — не читалось; '' — без flow.
+    inbound_flows: dict[int, str] | None = None
+    # inbound'ы, к которым этот вызов apply_quota_client прикрепил клиента (или
+    # создал его), прочитав перед этим, что привязки нет.
+    attached_inbound_ids: list[int] = field(default_factory=list)
 
     @property
     def depleted(self) -> bool:
@@ -136,16 +142,52 @@ class PanelUpdater(TypingProtocol):
     async def apply_quota_client(
         self, server: Server, spec: ServerProvision, target: QuotaTarget
     ) -> QuotaClientState:
-        """Создаёт/обновляет клиента с квотой и проверяет результат чтением."""
+        """Создаёт/обновляет клиента с квотой и проверяет результат чтением.
+
+        ``spec.inbounds`` — целевые inbound'ы: недостающие прикрепляются (attach)
+        до обновления параметров, flow целевых задаётся явно (None — без flow).
+        Прочие привязки клиента не снимаются, их flow по возможности сохраняется.
+        """
         ...
+
+    async def detach_quota_client(
+        self, server: Server, email: str, inbound_ids: list[int]
+    ) -> QuotaClientState | None:
+        """Снимает привязки клиента к ``inbound_ids`` (счётчик сохраняется).
+
+        Проверяет чтением, что привязок не осталось; None — клиента нет.
+        """
+        ...
+
+
+def effective_flow(state: QuotaClientState) -> str:
+    """flow, который 3x-ui копирует при attach: первый непустой по id inbound'а."""
+    flows = state.inbound_flows or {}
+    return next((flows[i] for i in sorted(flows) if flows[i]), "")
 
 
 class MockPanelUpdater:
     """Mock-реализация: ничего не делает либо имитирует сбой нужных серверов.
 
-    Для whitelist-сервера ведёт простую модель панели: клиент по email,
-    totalGB/enable/expiry и счётчик up+down; ``consume`` имитирует трафик и
-    отключение панелью при исчерпании квоты.
+    Для whitelist-сервера ведёт модель панели 3x-ui >= 3.2: клиент по email
+    (общая запись: totalGB/enable/expiry), привязки к inbound'ам с flow в
+    настройках каждого inbound'а и одна строка статистики up+down на email.
+    ``consume`` имитирует трафик и отключение панелью при исчерпании квоты.
+
+    Семантика, сверенная с исходниками 3x-ui v3.2.0–v3.9.0:
+
+    * attach копирует общую запись клиента в новый inbound (flow — первый
+      непустой flow его привязок) и не трогает счётчик;
+    * update с фильтром ``inboundIds`` (3.3+) меняет общую запись, а flow — только
+      в inbound'ах фильтра; ``update_filter_supported=False`` моделирует 3.2.0, где
+      фильтра нет и flow тела пишется во все привязки;
+    * detach снимает привязку, сохраняя строку статистики (keepTraffic);
+    * удаление inbound'а на панели снимает его привязки (``remove_inbound``).
+
+    ``fail_steps`` — сбои шагов применения: ``attach``/``update``/``detach`` — до
+    изменения; ``attach_lost``/``detach_lost`` — изменение выполнено, ответ
+    потерян; ``verify`` — чтение после записи не подтвердило результат;
+    ``detach_ignored`` — панель ответила успехом, но привязку не сняла.
     """
 
     def __init__(self, fail_server_ids: set[int] | None = None) -> None:
@@ -156,6 +198,17 @@ class MockPanelUpdater:
         self.deleted: list[tuple[int, tuple[str, ...]]] = []
         self.quota_clients: dict[tuple[int, str], QuotaClientState] = {}
         self.quota_applied: list[tuple[int, str, QuotaTarget]] = []
+        # Inbound'ы панели: server_id → {inbound_id: включён}. Сервер без записи —
+        # любой inbound существует и включён.
+        self.panel_inbounds: dict[int, dict[int, bool]] = {}
+        self.removed_inbounds: set[tuple[int, int]] = set()
+        self.update_filter_supported = True
+        self.fail_steps: set[str] = set()
+        self.attached: list[tuple[int, str, tuple[int, ...]]] = []
+        self.detached: list[tuple[int, str, tuple[int, ...]]] = []
+        self.updated: list[tuple[int, str, tuple[int, ...]]] = []
+        # Версия панели, пересоздающая строку статистики при detach (защитная модель).
+        self.detach_recreates_traffic = False
         self._next_row_id = 100
 
     def _new_row_id(self) -> int:
@@ -189,6 +242,20 @@ class MockPanelUpdater:
         state.traffic_row_id = self._new_row_id()
         state.last_online_ms = None
 
+    def remove_inbound(self, server_id: int, inbound_id: int) -> None:
+        """Inbound удалён на панели: его привязки исчезают у всех клиентов."""
+        self.removed_inbounds.add((server_id, inbound_id))
+        self.panel_inbounds.get(server_id, {}).pop(inbound_id, None)
+        for (sid, _email), state in self.quota_clients.items():
+            if sid == server_id and inbound_id in state.inbound_ids:
+                state.inbound_ids = [i for i in state.inbound_ids if i != inbound_id]
+                if state.inbound_flows is not None:
+                    state.inbound_flows.pop(inbound_id, None)
+
+    def _fail(self, step: str) -> None:
+        if step in self.fail_steps:
+            raise PanelUpdateError(f"mock failure at {step}")
+
     async def read_quota_client(
         self, server: Server, email: str
     ) -> QuotaClientState | None:
@@ -197,6 +264,7 @@ class MockPanelUpdater:
         state = self.quota_clients.get((server.id, email))
         if state is None:
             return None
+        flows = state.inbound_flows or {}
         return QuotaClientState(
             email=state.email,
             enable=state.enable,
@@ -206,6 +274,7 @@ class MockPanelUpdater:
             used_bytes=state.used_bytes,
             traffic_row_id=state.traffic_row_id,
             last_online_ms=state.last_online_ms,
+            inbound_flows={i: flows.get(i, "") for i in state.inbound_ids},
         )
 
     async def read_quota_clients(
@@ -226,26 +295,92 @@ class MockPanelUpdater:
         if server.id in self.fail_server_ids:
             raise PanelUpdateError(f"mock failure for server {server.id}")
         inbound_ids = [i.inbound_id for i in spec.inbounds]
+        flows = {i.inbound_id: i.flow or "" for i in spec.inbounds}
+        live = self.panel_inbounds.get(server.id)
+        unavailable = [
+            i for i in inbound_ids
+            if (server.id, i) in self.removed_inbounds
+            or (live is not None and not live.get(i, False))
+        ]
+        if unavailable:
+            raise PanelUpdateError(f"Недоступные inbound на сервере {server.id}: {unavailable}")
         state = self.quota_clients.get((server.id, spec.email))
+        attached: list[int] = []
         if state is None:
+            self._fail("attach")
             state = QuotaClientState(
                 email=spec.email,
                 enable=target.enable,
                 total_bytes=target.total_bytes,
                 expiry_ms=target.expiry_ms,
-                inbound_ids=inbound_ids,
+                inbound_ids=sorted(inbound_ids),
                 used_bytes=0,
                 traffic_row_id=self._new_row_id(),
+                inbound_flows=dict(flows),
             )
             self.quota_clients[(server.id, spec.email)] = state
+            attached = sorted(inbound_ids)
+            self.attached.append((server.id, spec.email, tuple(attached)))
+            self._fail("attach_lost")
         else:
+            if state.inbound_flows is None:
+                state.inbound_flows = dict.fromkeys(state.inbound_ids, "")
+            missing = sorted(set(inbound_ids) - set(state.inbound_ids))
+            if missing:
+                self._fail("attach")
+                # attach копирует общую запись: flow — действующий flow клиента.
+                copied = effective_flow(state)
+                state.inbound_ids = sorted(set(state.inbound_ids) | set(missing))
+                for inbound_id in missing:
+                    state.inbound_flows[inbound_id] = copied
+                attached = missing
+                self.attached.append((server.id, spec.email, tuple(missing)))
+                self._fail("attach_lost")
+            self._fail("update")
             state.enable = target.enable
             state.total_bytes = target.total_bytes
             state.expiry_ms = target.expiry_ms
-            state.inbound_ids = sorted(set(state.inbound_ids) | set(inbound_ids))
+            scope = inbound_ids if self.update_filter_supported else list(state.inbound_ids)
+            self.updated.append((server.id, spec.email, tuple(scope)))
+            for inbound_id in scope:
+                # Без фильтра (3.2.0) flow тела пишется во все привязки клиента.
+                state.inbound_flows[inbound_id] = flows.get(inbound_id, flows[inbound_ids[-1]])
         if state.depleted:
             state.enable = False
-        return await self.read_quota_client(server, spec.email)  # type: ignore[return-value]
+        result = await self.read_quota_client(server, spec.email)
+        assert result is not None
+        self._fail("verify")
+        result.attached_inbound_ids = attached
+        return result
+
+    async def detach_quota_client(
+        self, server: Server, email: str, inbound_ids: list[int]
+    ) -> QuotaClientState | None:
+        self.detached.append((server.id, email, tuple(inbound_ids)))
+        if server.id in self.fail_server_ids:
+            raise PanelUpdateError(f"mock failure for server {server.id}")
+        state = self.quota_clients.get((server.id, email))
+        if state is None:
+            return None
+        present = [i for i in inbound_ids if i in state.inbound_ids]
+        if present and "detach_ignored" not in self.fail_steps:
+            self._fail("detach")
+            state.inbound_ids = [i for i in state.inbound_ids if i not in present]
+            if state.inbound_flows is not None:
+                for inbound_id in present:
+                    state.inbound_flows.pop(inbound_id, None)
+            if self.detach_recreates_traffic:
+                state.used_bytes = 0
+                state.traffic_row_id = self._new_row_id()
+                state.last_online_ms = None
+            self._fail("detach_lost")
+        result = await self.read_quota_client(server, email)
+        if result is not None and set(inbound_ids) & set(result.inbound_ids):
+            raise PanelUpdateError(
+                f"Панель не подтвердила снятие привязок клиента {email}: "
+                f"inbound={result.inbound_ids}"
+            )
+        return result
 
     async def update_expiry(
         self, server: Server, mapping: ClientServerMapping, expiry_ms: int

@@ -253,14 +253,14 @@ async def test_health_poller_triggers_subhub_after_recovering_payment(
     async def fake_check(session, **kwargs):
         return {}
 
-    async def stop(session, updater):  # конец первой итерации цикла
+    async def stop(_seconds):  # конец первой итерации цикла
         raise asyncio.CancelledError
 
     monkeypatch.setattr(app_main, "get_sessionmaker", lambda: _Maker())
     monkeypatch.setattr(app_main, "build_updater", lambda **_: object())
     monkeypatch.setattr(billing, "recover_confirmed_payments", fake_recover)
     monkeypatch.setattr(health, "check_servers", fake_check)
-    monkeypatch.setattr(whitelist, "process_due", stop)
+    monkeypatch.setattr(app_main.asyncio, "sleep", stop)
     async with LocalSubHub() as hub:
         settings = _settings(hub).model_copy(update={"server_health_poll_seconds": 60})
         with pytest.raises(asyncio.CancelledError):

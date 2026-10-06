@@ -481,6 +481,12 @@ class WhitelistAccount(Base):
     ``checkpoint + free + paid`` с предварительно (без расхода) применёнными
     неприменёнными событиями — гарантированная нижняя граница остатка.
     ``last_synced_at`` — момент, к которому относятся подтверждённые остатки.
+
+    Значения счётчика (точка, привязки событий) хранятся в координатах текущей
+    эпохи строки статистики. При сбросе/пересоздании клиента новая эпоха
+    продолжает последнее прочитанное значение прежней: прежние значения
+    сдвигаются, и точка может стать отрицательной — это расход прежней эпохи,
+    ещё не списанный с остатков (ждёт решения администратора).
     """
 
     __tablename__ = "whitelist_accounts"
@@ -505,6 +511,14 @@ class WhitelistAccount(Base):
     panel_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     usage_checkpoint_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     traffic_row_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Последнее прочитанное значение счётчика текущей эпохи и момент, не раньше
+    # которого оно прочитано (пакетное чтение, начатое до него, устарело).
+    # Обновляется и тогда, когда остатки не сверяются (событие ждёт решения):
+    # по нему обнаруживается сброс счётчика.
+    usage_observed_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    usage_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Целевое состояние панели: desired_version растёт при каждом изменении
     # остатков/доступа; applied_version — последнее подтверждённое панелью.
@@ -530,12 +544,64 @@ class WhitelistAccount(Base):
     admin_blocked: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, server_default=text("false")
     )
+    # Подтверждённое размещение клиента: сервер, целевой inbound и flow, на которых
+    # чтением подтверждено, что клиент привязан к цели, а прежние привязки услуги
+    # сняты. NULL — не подтверждалось (в т. ч. строки до миграции a4b5c6d7e8f9):
+    # очередь проверит размещение заново. flow '' — без flow.
+    placement_server_id: Mapped[int | None] = mapped_column(
+        ForeignKey("servers.id", ondelete="SET NULL"), nullable=True
+    )
+    placement_inbound_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    placement_flow: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    placement_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=datetime.utcnow
     )
 
     __mapper_args__ = {"version_id_col": version}
+
+
+class WhitelistPlacement(Base):
+    """Привязка клиента whitelist-панели к inbound'у, созданная самой услугой.
+
+    Строка появляется до запроса attach/create, только если чтение перед ним
+    показало, что привязки нет (``attaching``), и подтверждается чтением после
+    него (``attached``). Привязки без строки — чужие или неизвестного
+    происхождения: услуга их не снимает. При смене цели прежние привязки услуги
+    снимаются (``detaching``) после подтверждения новой; строка удаляется, когда
+    чтение показало, что привязки на панели нет.
+    """
+
+    __tablename__ = "whitelist_placements"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "server_id", "inbound_id", name="uq_whitelist_placements_target"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    server_id: Mapped[int] = mapped_column(
+        ForeignKey("servers.id", ondelete="CASCADE"), nullable=False
+    )
+    inbound_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Email клиента панели, под которым создана привязка.
+    panel_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    # attaching | attached | detaching
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    # service — создана услугой; claimed — признана администратором (/wlclaim).
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="service", server_default="service"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class WhitelistLedger(Base):

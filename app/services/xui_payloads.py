@@ -162,12 +162,16 @@ def merge_client_record_for_update(
     tg_id: int | None = None,
     total_bytes: int | None = None,
     quota_policy: bool = False,
+    explicit_flow: bool = False,
 ) -> dict[str, Any]:
     """Тело ``clients/update``: сохраняет секреты панели, меняет срок и enable.
 
     Поля ``id``, ``password``, ``auth``, ``method`` и пр. не перезаписываются —
     иначе ломаются мультипротокольные клиенты (hysteria auth ≠ vless uuid).
     ``total_bytes=None`` сохраняет прежний totalGB панели (обычные серверы).
+    flow по умолчанию только дополняется (прежний flow панели сохраняется);
+    ``explicit_flow`` задаёт его ровно (``None``/'' — очистить): так flow целевого
+    inbound'а услуги применяется и при смене, и при отмене.
     """
     merged = dict(existing)
     merged["email"] = email
@@ -180,7 +184,9 @@ def merge_client_record_for_update(
         merged.update(_QUOTA_RESET_POLICY)
     if tg_id is not None:
         merged["tgId"] = tg_id
-    if flow and not merged.get("flow"):
+    if explicit_flow:
+        merged["flow"] = flow or ""
+    elif flow and not merged.get("flow"):
         merged["flow"] = flow
     return sanitize_client_for_api(merged)
 
