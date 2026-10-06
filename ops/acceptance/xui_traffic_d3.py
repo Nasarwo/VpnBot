@@ -47,6 +47,7 @@ from ops.acceptance.whitelist_e2e import (  # noqa: E402
     MIB,
     Panel,
     Report,
+    xray_binary,
     xray_client_config,
 )
 
@@ -114,10 +115,15 @@ class Lab:
         if not sh("docker", "network", "ls", "-q", "-f", f"name=^{self.net}$").strip():
             sh("docker", "network", "create", self.net)
         sh("docker", "rm", "-f", self.files, check=False)
-        sh("docker", "run", "-d", "--name", self.files, "--network", self.net,
-           "--network-alias", "files.acc.test", "-v", f"{files}:/usr/share/nginx/html:ro",
-           "-v", f"{tls}:/etc/nginx/tls:ro",
-           "-v", f"{self.state / 'nginx.conf'}:/etc/nginx/conf.d/default.conf:ro", "nginx:alpine")
+        for fixture in files.iterdir():
+            fixture.chmod(0o644)
+        sh("docker", "create", "--name", self.files, "--network", self.net,
+           "--network-alias", "files.acc.test", "nginx:alpine")
+        sh("docker", "cp", f"{files}/.", f"{self.files}:/usr/share/nginx/html/")
+        sh("docker", "cp", str(tls), f"{self.files}:/etc/nginx/tls")
+        sh("docker", "cp", str(self.state / "nginx.conf"),
+           f"{self.files}:/etc/nginx/conf.d/default.conf")
+        sh("docker", "start", self.files)
 
     def down(self) -> None:
         sh("docker", "rm", "-f", self.container, self.files, check=False)
@@ -749,6 +755,7 @@ SCENARIOS = {
 
 
 async def main() -> int:
+    global XRAY
     parser = argparse.ArgumentParser()
     parser.add_argument("state", type=Path)
     parser.add_argument("--image", default=DEFAULT_IMAGE)
@@ -757,6 +764,9 @@ async def main() -> int:
     parser.add_argument("--report", type=Path)
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
+    XRAY = xray_binary(args.image)
+    if xray_binary(args.client_image) != XRAY:
+        raise RuntimeError("Panel and client image architectures must match")
     lab = Lab(args.state, args.image, args.client_image)
     started = time.monotonic()
     lab.up()

@@ -822,15 +822,15 @@
     "semantic_hash": ""
   },
   "ops/acceptance/stack.sh": {
-    "mtime": 1791239775.4133885,
-    "seen": 1791242403.9395697,
-    "ast_hash": "aa58d5791f0aa60582a8825b2b7bf44f",
+    "mtime": 1791258429.1341972,
+    "seen": 1791258629.1902895,
+    "ast_hash": "74dbbf49b0057f1fc84074fde3929ec8",
     "semantic_hash": ""
   },
   "ops/acceptance/whitelist_e2e.py": {
-    "mtime": 1791256144.6593356,
-    "seen": 1791256746.3857217,
-    "ast_hash": "88deda4daa6e32b3633c64336592ac0e",
+    "mtime": 1791258407.7329807,
+    "seen": 1791258629.1903005,
+    "ast_hash": "52ca73173edd6ee1db91a58c098b3fa1",
     "semantic_hash": ""
   },
   "ops/acceptance/whitelist_migration_check.py": {
@@ -960,9 +960,9 @@
     "semantic_hash": ""
   },
   "ops/acceptance/subhub_quota_e2e.py": {
-    "mtime": 1791256144.6613357,
-    "seen": 1791256746.38572,
-    "ast_hash": "78f20b76f39ad849ddf290ee101a208c",
+    "mtime": 1791258209.148948,
+    "seen": 1791258629.1902943,
+    "ast_hash": "6625cb2ea2982bb3c557cb5581dd5f30",
     "semantic_hash": ""
   },
   "docs/acceptance/subhub_quota_2026-10-05.md": {
@@ -996,9 +996,9 @@
     "semantic_hash": ""
   },
   "ops/acceptance/xui_traffic_d3.py": {
-    "mtime": 1791239775.4163885,
-    "seen": 1791242403.9395742,
-    "ast_hash": "c222f49e3965e566053db2cc2c9a7868",
+    "mtime": 1791258496.030871,
+    "seen": 1791258629.1903102,
+    "ast_hash": "ae0082933d6da742bd6ed12de3183a66",
     "semantic_hash": ""
   },
   "tests/test_whitelist_epoch.py": {
@@ -1047,6 +1047,18 @@
     "mtime": 1791255889.1982458,
     "seen": 1791256746.3857589,
     "ast_hash": "a1e956dd242ee93a0cf055ef83c746d9",
+    "semantic_hash": ""
+  },
+  "ops/acceptance/whitelist_retarget_e2e.py": {
+    "mtime": 1791258407.755981,
+    "seen": 1791258629.1903067,
+    "ast_hash": "7911c8cbb9e0c25bf30906ba4de43811",
+    "semantic_hash": ""
+  },
+  "docs/DEPLOYMENT_2026-10-06.md": {
+    "mtime": 1791258048.6762629,
+    "seen": 1791258629.1904771,
+    "ast_hash": "9f7961e6a7ecba8014b0354de0121039",
     "semantic_hash": ""
   }
 }

@@ -25,6 +25,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -143,6 +144,18 @@ class Report:
 R = Report()
 
 
+@lru_cache
+def xray_binary(image: str) -> str:
+    """Use the binary packaged for the container image's architecture."""
+    arch = subprocess.check_output(
+        ["docker", "image", "inspect", "--format", "{{.Architecture}}", image], text=True,
+    ).strip()
+    suffix = {"amd64": "amd64", "arm64": "arm64"}.get(arch)
+    if suffix is None:
+        raise RuntimeError(f"Unsupported acceptance image architecture: {arch}")
+    return f"/app/bin/xray-linux-{suffix}"
+
+
 # --- Стенд ---------------------------------------------------------------------
 
 
@@ -207,7 +220,7 @@ class Panel:
     async def add_inbound(self, port: int, remark: str) -> int:
         """VLESS + REALITY (TCP), как у рабочих серверов; цель — локальный TLS 1.3."""
         keys = subprocess.run(
-            ["docker", "run", "--rm", "--entrypoint", "/app/bin/xray-linux-arm64", self.image,
+            ["docker", "run", "--rm", "--entrypoint", xray_binary(self.image), self.image,
              "x25519"], capture_output=True, text=True, check=True,
         ).stdout.splitlines()
         private = next(line.split(":", 1)[1].strip() for line in keys
@@ -283,7 +296,7 @@ class Panel:
         до первого трафика пользователя счётчика нет (None).
         """
         proc = subprocess.run(
-            ["docker", "exec", self.container, "/app/bin/xray-linux-arm64", "api", "statsquery",
+            ["docker", "exec", self.container, xray_binary(self.image), "api", "statsquery",
              "--server=127.0.0.1:62789", f"-pattern=user>>>{email}>>>"],
             capture_output=True, text=True,
         )
@@ -440,7 +453,7 @@ def probe(link: str, image: str, network: str) -> tuple[bool, str]:
         return False, "нет ссылки в подписке"
     config = xray_client_config(link)
     script = (
-        "cat > /tmp/c.json; /app/bin/xray-linux-arm64 run -c /tmp/c.json >/tmp/x.log 2>&1 & "
+        f"cat > /tmp/c.json; {xray_binary(image)} run -c /tmp/c.json >/tmp/x.log 2>&1 & "
         "sleep 1.5; curl -s -m 25 --socks5-hostname 127.0.0.1:10808 -o /dev/null "
         "-w '%{http_code} %{size_download}' http://files.acc.test/blob8m"
     )

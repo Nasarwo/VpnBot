@@ -78,6 +78,7 @@ if ! running ${PREFIX}-pg; then
     docker exec ${PREFIX}-pg pg_isready -U wlacc -d wlacc_test >/dev/null 2>&1 && break
     sleep 1
   done
+  docker exec ${PREFIX}-pg pg_isready -U wlacc -d wlacc_test >/dev/null
 fi
 
 start_panel() {  # name alias host-port
@@ -96,6 +97,8 @@ start_panel ${PREFIX}-xui-std std.acc.test "$STD_PORT"
 if [ ! -f "$STATE/files/blob8m" ]; then
   dd if=/dev/urandom of="$STATE/files/blob8m" bs=1048576 count=8 2>/dev/null
 fi
+chmod 755 "$STATE/files"
+chmod 644 "$STATE/files/blob8m"
 # Файловый сервер: HTTP-источник трафика и локальная TLS 1.3 цель REALITY
 # (inbound'ы стенда не обращаются к сайтам в интернете).
 if [ ! -f "$STATE/tls/cert.pem" ]; then
@@ -115,9 +118,13 @@ server {
 EOF
 if ! running ${PREFIX}-files; then
   docker rm -f ${PREFIX}-files >/dev/null 2>&1 || true
-  docker run -d --name ${PREFIX}-files --network "$NET" --network-alias files.acc.test \
-    -v "$STATE/files:/usr/share/nginx/html:ro" -v "$STATE/tls:/etc/nginx/tls:ro" \
-    -v "$STATE/nginx.conf:/etc/nginx/conf.d/default.conf:ro" nginx:alpine >/dev/null
+  # Copy fixtures: Docker Desktop need not share the host state directory.
+  docker create --name ${PREFIX}-files --network "$NET" --network-alias files.acc.test \
+    nginx:alpine >/dev/null
+  docker cp "$STATE/files/." ${PREFIX}-files:/usr/share/nginx/html/
+  docker cp "$STATE/tls" ${PREFIX}-files:/etc/nginx/tls
+  docker cp "$STATE/nginx.conf" ${PREFIX}-files:/etc/nginx/conf.d/default.conf
+  docker start ${PREFIX}-files >/dev/null
 fi
 
 subhub_config() {  # refresh-seconds base-url
@@ -164,12 +171,15 @@ EOF
 start_subhub() {  # name host-port config-file refresh-seconds
   if running "$1"; then return; fi
   subhub_config "$4" "http://127.0.0.1:$2" >"$STATE/$3"
+  chmod 644 "$STATE/$3" # credentials are environment references, not YAML values
   (umask 077; printf 'PANEL_USER=%s\nPANEL_PASS=%s\nADMIN_TOKEN=%s\n' \
     "$XUI_USER" "$XUI_PASS" "$SUBHUB_ADMIN_TOKEN" >"$STATE/subhub.env")
   docker rm -f "$1" >/dev/null 2>&1 || true
-  docker run -d --name "$1" --network "$NET" -p 127.0.0.1:"$2":8080 \
+  docker create --name "$1" --network "$NET" -p 127.0.0.1:"$2":8080 \
     --env-file "$STATE/subhub.env" -e SUBHUB_CONFIG=/app/config.yaml \
-    -v "$STATE/$3:/app/config.yaml:ro" ${PREFIX}-subhub:src >/dev/null
+    ${PREFIX}-subhub:src >/dev/null
+  docker cp "$STATE/$3" "$1":/app/config.yaml
+  docker start "$1" >/dev/null
 }
 
 if ! running ${PREFIX}-subhub || ! running ${PREFIX}-subhub-poll; then
@@ -184,6 +194,7 @@ for url in "$SUBHUB_URL" "http://127.0.0.1:${SUB_POLL_PORT}"; do
     curl -sf "$url/health" >/dev/null 2>&1 && break
     sleep 1
   done
+  curl -sf "$url/health" >/dev/null
 done
 echo "стенд готов: PG 127.0.0.1:${PG_PORT}, whitelist ${WL_PANEL}, обычная ${STD_PANEL}," \
   "SubHub ${SUBHUB_URL} (триггер бота), http://127.0.0.1:${SUB_POLL_PORT} (только опрос, ${POLL_SECONDS} с)"

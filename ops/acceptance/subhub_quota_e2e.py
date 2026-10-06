@@ -42,6 +42,7 @@ from ops.acceptance.whitelist_e2e import (  # noqa: E402
     load_env,
     observe_d3,
     probe,
+    xray_binary,
 )
 
 R = Report()
@@ -89,7 +90,7 @@ async def xray_command(panel: Panel, action: str) -> None:
 async def import_control_inbound(panel: Panel, port: int) -> int:
     """VLESS REALITY inbound с клиентом контрольного примера и его статистикой."""
     keys = subprocess.run(
-        ["docker", "run", "--rm", "--entrypoint", "/app/bin/xray-linux-arm64", panel.image,
+        ["docker", "run", "--rm", "--entrypoint", xray_binary(panel.image), panel.image,
          "x25519"], capture_output=True, text=True, check=True,
     ).stdout.splitlines()
     private = next(line.split(":", 1)[1].strip() for line in keys if line.startswith("PrivateKey"))
