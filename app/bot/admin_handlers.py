@@ -50,6 +50,7 @@ from app.services import (
     billing,
     bind_requests,
     broadcast,
+    pending_updates,
     provisioning,
     subscription_delete,
     whitelist,
@@ -446,6 +447,9 @@ async def admin_nav(
     if action == "del_yes":
         server = await repo.get_by_id(sid)
         name = server.name if server else "?"
+        if server is not None:
+            # Отложенные продления на удаляемый сервер больше неприменимы.
+            await pending_updates.close_for_server(session, sid, "server deleted")
         deleted = await repo.delete(sid)
         if deleted:
             await session.commit()

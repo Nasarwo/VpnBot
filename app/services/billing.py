@@ -13,6 +13,8 @@ from app.db.models import (
     PAYMENT_KIND_TRAFFIC,
     SERVER_PURPOSE_STANDARD,
     PaymentRequest,
+    SubscriptionPurchase,
+    TrialGrant,
     User,
     VpnClient,
 )
@@ -53,6 +55,8 @@ class TrialResult:
     applied: bool
     already_used: bool = False
     no_client: bool = False
+    # Подписка уже оформлялась: trial допустим только до первой подписки.
+    subscription_purchased: bool = False
     new_expires_at: datetime | None = None
     failed_servers: list[ServerUpdateResult] = field(default_factory=list)
     whitelist_pending: bool = False
@@ -180,7 +184,9 @@ async def _persist_target_before_panels(
     payment.target_expires_at = target_expiry
     if payment.status == PaymentStatus.WAITING_ADMIN:
         payment.status = PaymentStatus.CONFIRMED
-        payment.confirmed_at = now
+    # Принятие оплаты фиксируется и при повторе заявки, упавшей до принятия
+    # (``failed`` без клиента): теперь администратор её принял.
+    payment.confirmed_at = payment.confirmed_at or now
     await session.commit()
 
 
@@ -325,6 +331,8 @@ async def _extend_and_finalize(
     client.expiry_notify_stage = 0
     payment.status = PaymentStatus.APPLIED
     payment.applied_at = now
+    # Факт оплаты подписки переживает сброс бота и закрывает trial Telegram ID.
+    await _record_subscription_purchase(session, user, payment, now)
     if not failed:
         payment.last_error = None
     await audit.record(
@@ -537,6 +545,80 @@ async def sync_client(
     return results
 
 
+async def trial_already_used(session: AsyncSession, user: User) -> bool:
+    """Пробный период уже выдавался этому пользователю или его Telegram ID.
+
+    ``users.trial_used`` пропадает при сбросе бота вместе с ``User``; запись
+    ``trial_grants`` по Telegram ID сохраняется.
+    """
+    if user.trial_used:
+        return True
+    if user.telegram_id is None:
+        return False
+    grant = await session.scalar(
+        select(TrialGrant.telegram_id).where(TrialGrant.telegram_id == user.telegram_id)
+    )
+    return grant is not None
+
+
+async def _record_subscription_purchase(
+    session: AsyncSession, user: User | None, payment: PaymentRequest, now: datetime
+) -> None:
+    """Сохраняет первую применённую оплату подписки по Telegram ID пользователя.
+
+    Вызывается под блокировкой пользователя, общей с ``grant_trial`` и сбросом, в
+    транзакции, которая переводит заявку в ``applied``. Пользователь без Telegram
+    ID (только сайт) не сбрасывается ботом: для него достаточно самих заявок.
+    """
+    if user is None or user.telegram_id is None:
+        return
+    if await session.get(SubscriptionPurchase, user.telegram_id) is not None:
+        return
+    session.add(
+        SubscriptionPurchase(
+            telegram_id=user.telegram_id,
+            user_id=user.id,
+            payment_request_id=payment.id,
+            paid_at=now,
+        )
+    )
+
+
+async def subscription_already_purchased(session: AsyncSession, user: User) -> bool:
+    """Подписку уже оформляли этот пользователь или его Telegram ID.
+
+    Оформлена — есть принятая оплата вида ``subscription`` (``confirmed``/``applied``
+    либо ``failed`` после принятия администратором: ``confirmed_at``/
+    ``target_expires_at``), даже с истёкшим сроком, либо запись ``subscription_purchases``
+    по Telegram ID: заявки пропадают при сбросе бота вместе с ``User``, запись
+    остаётся.
+    """
+    if await PaymentRepository(session).has_paid_subscription(user.id):
+        return True
+    if user.telegram_id is None:
+        return False
+    found = await session.scalar(
+        select(SubscriptionPurchase.telegram_id).where(
+            SubscriptionPurchase.telegram_id == user.telegram_id
+        )
+    )
+    return found is not None
+
+
+async def trial_available(session: AsyncSession, user: User) -> bool:
+    """Единое правило допуска trial: он не использован и подписку ещё не оформляли.
+
+    Покупки трафика, ожидающие и отклонённые заявки, а также ``failed`` до принятия
+    оплаты подпиской не считаются; ``failed`` после принятия (сбой применения) —
+    считается (см. ``subscription_already_purchased``). Кнопка бота и
+    веб-мост только скрывают действие по этому правилу; обязательное применение —
+    в ``grant_trial`` под блокировкой пользователя.
+    """
+    if await trial_already_used(session, user):
+        return False
+    return not await subscription_already_purchased(session, user)
+
+
 @serialized_access("user_id", "user")
 async def grant_trial(
     session: AsyncSession,
@@ -545,10 +627,14 @@ async def grant_trial(
     period_days: int = 2,
     now: datetime | None = None,
 ) -> TrialResult:
-    """Выдаёт бесплатный пробный период один раз на аккаунт.
+    """Выдаёт бесплатный пробный период один раз на Telegram-аккаунт и до первой подписки.
 
-    Пробный период резервируется в той же транзакции, что и продление. При ошибке
-    обновления панелей транзакция откатывается, и пользователь может попробовать снова.
+    Использование фиксируется в ``trial_grants``, оплата подписки — в
+    ``subscription_purchases``, обе по Telegram ID, поэтому сброс бота (новый
+    ``User`` для того же Telegram ID) trial не возвращает. Отметка
+    сохраняется в той же транзакции, что и продление; при ошибке обновления панелей
+    она не записывается, и пользователь может попробовать снова. Проверка и
+    отметка выполняются под блокировкой пользователя, общей со сбросом.
     """
     now = now or _utcnow()
     user = await session.scalar(
@@ -565,8 +651,13 @@ async def grant_trial(
         period_days,
     )
 
-    if user.trial_used:
+    if await trial_already_used(session, user):
         return TrialResult(applied=False, already_used=True)
+    # Подтверждение оплаты берёт ту же блокировку пользователя, поэтому оплата,
+    # которую уже принял администратор, видна здесь, а новая ждёт окончания trial.
+    # Оплата, удалённая сбросом бота, учитывается по Telegram ID.
+    if await subscription_already_purchased(session, user):
+        return TrialResult(applied=False, subscription_purchased=True)
 
     client = await VpnClientRepository(session).get_for_user(user_id)
     targets = await provisioning.has_targets(session)
@@ -603,6 +694,8 @@ async def grant_trial(
         return TrialResult(applied=False, failed_servers=failed)
 
     user.trial_used = True
+    if user.telegram_id is not None:
+        session.add(TrialGrant(telegram_id=user.telegram_id, user_id=user.id, granted_at=now))
     client.expires_at = new_expiry
     client.is_active = True
     client.expiry_notify_stage = 0
@@ -661,22 +754,52 @@ async def reject_payment(
     return payment
 
 
-async def recover_confirmed_payments(session: AsyncSession, updater: PanelUpdater) -> int:
-    """Resume durable payment intents after a process interruption."""
+async def recover_confirmed_payments(
+    session: AsyncSession,
+    updater: PanelUpdater,
+    *,
+    backoff: pending_updates.RetryBackoff | None = None,
+    now: datetime | None = None,
+) -> int:
+    """Возобновляет подтверждения, прерванные после фиксации целевого срока.
+
+    Заявка ``CONFIRMED`` с сохранённым ``target_expires_at`` повторяется через
+    ``retry_payment`` — под блокировкой пользователя и идемпотентно: срок берётся
+    из сохранённого target (более новый оплаченный срок не сокращается), пакет
+    продления повторно не выдаётся. Недоступные панели уходят в очередь
+    отложенных обновлений. Заявка, повтор которой упал непредвиденной ошибкой,
+    откладывается по ``backoff`` и не вытесняет остальные. Возвращает число
+    применённых заявок.
+    """
+    now = now or _utcnow()
+    query = select(PaymentRequest.id).where(
+        PaymentRequest.status == PaymentStatus.CONFIRMED,
+        PaymentRequest.kind == PAYMENT_KIND_SUBSCRIPTION,
+        PaymentRequest.target_expires_at.is_not(None),
+        PaymentRequest.confirmed_at < now - timedelta(minutes=5),
+    )
+    blocked = backoff.blocked(now) if backoff is not None else []
+    if blocked:
+        query = query.where(PaymentRequest.id.not_in(blocked))
     identifiers = (await session.scalars(
-        select(PaymentRequest.id).where(
-            PaymentRequest.status == PaymentStatus.CONFIRMED,
-            PaymentRequest.kind == PAYMENT_KIND_SUBSCRIPTION,
-            PaymentRequest.target_expires_at.is_not(None),
-            PaymentRequest.confirmed_at < _utcnow() - timedelta(minutes=5),
-        ).order_by(PaymentRequest.id).limit(10)
+        query.order_by(PaymentRequest.id).limit(10)
     )).all()
     recovered = 0
     for identifier in identifiers:
         try:
             result = await retry_payment(session, identifier, None, updater)
-            recovered += int(result.applied)
         except Exception:  # noqa: BLE001
             await session.rollback()
-            logger.exception("Failed to recover confirmed payment #%s", identifier)
+            if backoff is not None:
+                delay = backoff.failed(identifier, now)
+                logger.exception(
+                    "Failed to recover confirmed payment #%s, next try in %s",
+                    identifier, delay,
+                )
+            else:
+                logger.exception("Failed to recover confirmed payment #%s", identifier)
+            continue
+        if backoff is not None:
+            backoff.succeeded(identifier)
+        recovered += int(result.applied)
     return recovered

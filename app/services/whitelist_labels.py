@@ -13,7 +13,11 @@ from app.config import Settings
 from app.db.models import VpnClient, WhitelistAccount, WhitelistLedger
 from app.db.session import get_sessionmaker
 from app.services.whitelist import (
-    EVENT_SETTLED, LEDGER_ADJUST, LEDGER_FREE_GRANT, LEDGER_PURCHASE, LEDGER_ROLLOUT,
+    EVENT_SETTLED,
+    LEDGER_ADJUST,
+    LEDGER_FREE_GRANT,
+    LEDGER_PURCHASE,
+    LEDGER_ROLLOUT,
     access_state,
 )
 
@@ -26,7 +30,9 @@ def package_bases(events) -> dict[int, int]:
     for event in events:
         if event.status != EVENT_SETTLED:
             continue
-        if event.free_set is not None or event.kind in (LEDGER_ADJUST, LEDGER_FREE_GRANT, LEDGER_ROLLOUT):
+        if event.free_set is not None or event.kind in (
+            LEDGER_ADJUST, LEDGER_FREE_GRANT, LEDGER_ROLLOUT
+        ):
             bases[event.user_id] = event.free_after + event.paid_after
         elif event.kind == LEDGER_PURCHASE and event.user_id in bases:
             delta = event.paid_delta
@@ -76,7 +82,9 @@ async def publish_confirmed_snapshots(settings: Settings) -> bool:
     try:
         async with get_sessionmaker()() as session:
             if session.get_bind().dialect.name == "postgresql":
-                await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                await session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                )
             snapshots = await confirmed_snapshots(session)
         async with httpx.AsyncClient(timeout=settings.subhub_timeout_seconds) as client:
             for start in range(0, len(snapshots), 200):

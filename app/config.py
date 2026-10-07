@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     # конкретному аккаунту задаёт backoff самой очереди.
     whitelist_queue_poll_seconds: float = Field(default=30.0, gt=0)
 
+    # Период опроса восстановления обычных VPN-продлений, секунды: возобновление
+    # прерванных подтверждений оплат и очередь отложенных обновлений обычных
+    # серверов. Отдельный worker, не зависящий от SERVER_HEALTH_POLL_SECONDS;
+    # отключить его нельзя. Интервал повтора записи задаёт её backoff (1 мин → 1 ч).
+    renewal_recovery_poll_seconds: float = Field(default=30.0, gt=0)
+
     # Период проверки истекающих подписок для уведомлений, секунды (0 — отключить).
     expiry_notify_poll_seconds: int = Field(default=300, ge=0)
 

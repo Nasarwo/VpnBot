@@ -136,6 +136,7 @@ def started(monkeypatch):
         ("_whitelist_reconcile_poller", "reconcile"),
         ("_expiry_notify_poller", "expiry"),
         ("_whitelist_queue_worker", "queue"),
+        ("_renewal_recovery_worker", "renewal"),
     ):
         monkeypatch.setattr(app_main, attr, fake(name))
     return names

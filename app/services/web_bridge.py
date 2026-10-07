@@ -256,6 +256,7 @@ async def start_bridge(bot: Bot, settings: Settings) -> web.AppRunner | None:
                 .order_by(WebLinkRequest.id.desc())
                 .limit(1)
             )
+            trial_ok = await billing.trial_available(session, user)
             if action == "profile":
                 payments = (
                     await session.scalars(
@@ -283,7 +284,7 @@ async def start_bridge(bot: Bot, settings: Settings) -> web.AppRunner | None:
                     if client and client.expires_at
                     else None,
                     "trial_available": user.telegram_id is not None
-                    and not user.trial_used
+                    and trial_ok
                     and client is None,
                     "payments": [
                         {
@@ -440,12 +441,13 @@ async def start_bridge(bot: Bot, settings: Settings) -> web.AppRunner | None:
                 await session.commit()
                 return web.json_response({"ok": True}, status=201)
             if action == "trial":
-                if user.telegram_id is None or user.trial_used or client is not None:
-                    return problem(
-                        "Пробный доступ доступен только после привязки Telegram "
-                        "и до первой подписки",
-                        409,
-                    )
+                not_eligible = problem(
+                    "Пробный доступ доступен только после привязки Telegram "
+                    "и до первой подписки",
+                    409,
+                )
+                if user.telegram_id is None or not trial_ok or client is not None:
+                    return not_eligible
                 # Release account/user row locks before acquiring the shared access lock.
                 # grant_trial rechecks trial eligibility under its own user row lock.
                 await session.commit()
@@ -455,6 +457,8 @@ async def start_bridge(bot: Bot, settings: Settings) -> web.AppRunner | None:
                     build_updater(timeout=settings.xui_request_timeout),
                     settings.trial_period_days,
                 )
+                if result.already_used or result.subscription_purchased:
+                    return not_eligible
                 if not result.applied:
                     return problem("Не удалось выдать доступ. Попробуйте позднее.", 503)
                 await trigger_configured_sync(settings.subhub_url, settings.subhub_admin_token)

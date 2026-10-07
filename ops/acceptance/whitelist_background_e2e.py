@@ -15,10 +15,11 @@
   (``SUBHUB_POLL_SECONDS``, 30 с).
 
 Фоновые задачи запускает ``app.main.start_background_tasks`` — та же сборка,
-что у бота рядом с Telegram polling (опрос серверов с очередью и
-``recover_confirmed_payments``, обход сверки расхода, уведомления об окончании,
-сбор IP). Polling Telegram не запускается, транспорт Telegram заменён
-записывающей заглушкой. Обработчики бота вызываются напрямую, как в
+что у бота рядом с Telegram polling (опрос серверов; восстановление обычных
+продлений — ``recover_confirmed_payments`` и отложенные обновления, с 2026-10-07
+отдельным worker'ом с тем же периодом на стенде; очередь whitelist; обход сверки
+расхода; уведомления об окончании; сбор IP). Polling Telegram не запускается,
+транспорт Telegram заменён записывающей заглушкой. Обработчики бота вызываются напрямую, как в
 ``whitelist_e2e.py``; панели, PostgreSQL, SubHub и VLESS-трафик настоящие.
 
 Доказательства каждого изменения: время появления в SubHub-T и SubHub-P,
@@ -419,6 +420,7 @@ async def scenario(state: Path) -> None:
         "SUBHUB_URL": env["SUBHUB_URL"], "SUBHUB_ADMIN_TOKEN": env["SUBHUB_ADMIN_TOKEN"],
         "SUBHUB_TIMEOUT_SECONDS": str(SUBHUB_TIMEOUT), "XUI_REQUEST_TIMEOUT": "8",
         "SERVER_HEALTH_POLL_SECONDS": str(HEALTH_SECONDS),
+        "RENEWAL_RECOVERY_POLL_SECONDS": str(HEALTH_SECONDS),
         "WHITELIST_RECONCILE_MINUTES": str(RECONCILE_MINUTES),
         "WHITELIST_RECONCILE_BATCH_PAUSE_SECONDS": "0",
         "EXPIRY_NOTIFY_POLL_SECONDS": str(EXPIRY_NOTIFY_SECONDS),

@@ -74,6 +74,47 @@ class User(Base, TimestampMixin):
     )
 
 
+class TrialGrant(Base):
+    """Пробный период, выданный Telegram-аккаунту.
+
+    Хранится по Telegram ID отдельно от ``users``: сброс бота удаляет ``User`` и
+    создаёт новую запись для того же Telegram ID, а факт использования trial
+    должен остаться. ``user_id`` — справочно, без внешнего ключа: пользователь,
+    получивший trial, может быть уже удалён.
+    """
+
+    __tablename__ = "trial_grants"
+
+    telegram_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=False
+    )
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    granted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class SubscriptionPurchase(Base):
+    """Первая применённая оплата подписки Telegram-аккаунта.
+
+    Закрывает trial так же, как ``trial_grants``: хранится по Telegram ID без
+    внешних ключей, поэтому сброс бота, удаляющий ``User`` вместе с заявками,
+    факт оплаты не удаляет. ``user_id`` и ``payment_request_id`` — справочно:
+    пользователь и заявка могут быть уже удалены.
+    """
+
+    __tablename__ = "subscription_purchases"
+
+    telegram_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=False
+    )
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payment_request_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    paid_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class WebAccount(Base):
     __tablename__ = "web_accounts"
 
@@ -122,6 +163,7 @@ class WebDelivery(Base):
     """Durable per-admin Telegram delivery, retried independently of HTTP requests."""
 
     __tablename__ = "web_deliveries"
+    __table_args__ = (Index("ix_web_deliveries_due", "status", "next_attempt_at"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     admin_id: Mapped[int] = mapped_column(BigInteger)
     payload: Mapped[str] = mapped_column(Text)
@@ -412,6 +454,7 @@ class IpObservation(Base):
 
 class PendingServerUpdate(Base, TimestampMixin):
     __tablename__ = "pending_server_updates"
+    __table_args__ = (Index("ix_pending_server_updates_status_server", "status", "server_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     vpn_client_id: Mapped[int] = mapped_column(

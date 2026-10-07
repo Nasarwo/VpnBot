@@ -27,7 +27,15 @@ from app.db.repositories import (
     UserRepository,
     VpnClientRepository,
 )
-from app.services import access, audit, billing, bind_requests, payments, plans, whitelist
+from app.services import (
+    access,
+    billing,
+    bind_requests,
+    payments,
+    plans,
+    user_reset,
+    whitelist,
+)
 from app.services.subhub_client import (
     SubHubClient,
     SubHubError,
@@ -74,10 +82,7 @@ async def _welcome_markup(
 
 async def _trial_available(session: AsyncSession, db_user: User) -> bool:
     """Пробный доступен, если им не пользовались и подписку никогда не оформляли."""
-    if db_user.trial_used:
-        return False
-    last = await PaymentRepository(session).last_successful_for_user(db_user.id)
-    return last is None
+    return await billing.trial_available(session, db_user)
 
 
 def _plan_title_for_period(period_days: int) -> str | None:
@@ -419,58 +424,32 @@ async def _reset_bot_user(
     settings: Settings,
     state: FSMContext,
 ) -> None:
-    """Удаляет данные пользователя в боте и показывает онбординг заново."""
-    from sqlalchemy import select
+    """Удаляет данные пользователя в боте и показывает онбординг заново.
 
-    from app.db.models import WebAccount
-
-    linked = await session.scalar(
-        select(WebAccount.id).where(WebAccount.user_id == db_user.id)
-    )
-    if linked is not None:
-        await ui.answer_callback(
-            callback,
-            "Аккаунт связан с сайтом. Для сброса обратитесь в поддержку.",
-            show_alert=True,
-        )
+    Сброс не выполняется, пока он потерял бы оплату, начисление или заявку;
+    правило и сериализация с оплатами — в ``user_reset.delete_for_self_reset``.
+    """
+    outcome = await user_reset.delete_for_self_reset(session, db_user.id)
+    if outcome is None:
+        # Параллельное нажатие уже сбросило данные.
+        await ui.answer_callback(callback, "Данные уже сброшены")
         return
-    wl_account = await whitelist.get_account(session, db_user.id)
-    if wl_account is not None and wl_account.paid_bytes > 0:
-        # Сброс удалил бы купленный трафик, который не сгорает.
+    if outcome.blocker is not None:
         await ui.answer_callback(
-            callback,
-            "У вас есть купленный трафик «Обход белых списков». "
-            "Для сброса обратитесь в поддержку.",
-            show_alert=True,
+            callback, texts.reset_blocked(outcome.blocker), show_alert=True
         )
         return
     await state.clear()
-    telegram_id = db_user.telegram_id
-    username = db_user.username
-    first_name = db_user.first_name
-    old_user_id = db_user.id
-    old_public_id = db_user.public_id
-
-    await audit.record(
-        session,
-        action="user.self_reset",
-        actor_user_id=old_user_id,
-        entity_type="user",
-        entity_id=old_user_id,
-        payload={"telegram_id": telegram_id, "public_id": old_public_id},
-    )
-
+    telegram_id = outcome.telegram_id
     repo = UserRepository(session)
-    await repo.delete_user(db_user)
-    await session.commit()
 
     desired_role = (
         UserRole.ADMIN if settings.is_admin(telegram_id) else UserRole.USER
     )
     await repo.get_or_create(
         telegram_id=telegram_id,
-        username=username,
-        first_name=first_name,
+        username=outcome.username,
+        first_name=outcome.first_name,
         role=desired_role,
     )
     await session.commit()
@@ -562,6 +541,8 @@ async def _activate_trial(
     )
     if result.already_used:
         text = texts.trial_already_used()
+    elif result.subscription_purchased:
+        text = texts.trial_subscription_purchased()
     elif result.no_client:
         text = texts.trial_no_client()
     elif not result.applied:

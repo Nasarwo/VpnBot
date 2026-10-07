@@ -180,6 +180,8 @@ def test_settings_admin_parsing_is_strict():
         ("server_health_poll_seconds", -1),
         ("expiry_notify_poll_seconds", -1),
         ("anti_sharing_poll_minutes", -1),
+        ("renewal_recovery_poll_seconds", 0),
+        ("whitelist_queue_poll_seconds", 0),
     ],
 )
 def test_settings_rejects_dangerous_numeric_values(field: str, value: int):

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -14,11 +16,18 @@ from app.bot.router import build_root_router
 from app.config import Settings, get_settings
 from app.db.session import get_sessionmaker
 from app.logging_config import setup_logging
-from app.services import antishare, billing, expiry, health, whitelist
+from app.services import (
+    antishare,
+    expiry,
+    health,
+    pending_updates,
+    renewal_recovery,
+    whitelist,
+)
 from app.services.ip_provider import build_ip_provider
 from app.services.subhub_client import trigger_configured_sync
-from app.services.whitelist_labels import publish_confirmed_snapshots
 from app.services.web_bridge import delivery_loop, start_bridge
+from app.services.whitelist_labels import publish_confirmed_snapshots
 from app.services.xui_updater import build_updater
 
 logger = logging.getLogger(__name__)
@@ -70,35 +79,45 @@ async def _subhub_sync(settings: Settings, reason: str) -> bool:
 async def _server_health_poller(settings: Settings) -> None:
     """Фоновая периодическая проверка доступности серверов 3x-ui.
 
-    Очередь применения whitelist-квот здесь не обслуживается: её ведёт
-    ``_whitelist_queue_worker``, который работает и при отключённой проверке.
+    Только сохраняет статус серверов. Прерванные оплаты и отложенные обновления
+    обычных серверов обслуживает ``_renewal_recovery_worker``, очередь
+    whitelist-квот — ``_whitelist_queue_worker``; оба работают и при
+    ``SERVER_HEALTH_POLL_SECONDS=0``.
     """
     interval = settings.server_health_poll_seconds
     timeout = min(float(settings.xui_request_timeout), 10.0)
-    updater = build_updater(timeout=float(settings.xui_request_timeout))
     sessionmaker = get_sessionmaker()
-
-    async def subhub_sync(reason: str) -> bool:
-        return await _subhub_sync(settings, reason)
-
-    async def pending_applied() -> bool:
-        return await subhub_sync("отложенные обновления серверов")
-
     while True:
         try:
             async with sessionmaker() as session:
-                # Возобновлённая после рестарта оплата меняет панели так же, как
-                # подтверждение администратором, — SubHub должен их перечитать.
-                if await billing.recover_confirmed_payments(session, updater):
-                    await subhub_sync("возобновлены оплаты")
-                await health.check_servers(
-                    session,
-                    timeout=timeout,
-                    updater=updater,
-                    on_updates_applied=pending_applied,
-                )
+                await health.check_servers(session, timeout=timeout)
         except Exception:  # noqa: BLE001 - фоновая задача не должна падать
             logger.exception("Ошибка фоновой проверки серверов")
+        await asyncio.sleep(interval)
+
+
+async def _renewal_recovery_worker(settings: Settings) -> None:
+    """Восстановление обычных VPN-продлений после сбоев панелей и рестартов.
+
+    Единственный автоматический обработчик прерванных подтверждений оплат
+    (``CONFIRMED``) и очереди отложенных обновлений обычных серверов. Не зависит
+    от ``SERVER_HEALTH_POLL_SECONDS``: когда обращаться к панели снова, решает
+    backoff записи (``next_retry_at``). Блокировки пользователя и идемпотентность
+    обеспечивают сервисы; здесь — периодический запуск и уведомление SubHub после
+    зафиксированных изменений панелей.
+    """
+    interval = settings.renewal_recovery_poll_seconds
+    updater = build_updater(timeout=float(settings.xui_request_timeout))
+    sessionmaker = get_sessionmaker()
+    backoff = pending_updates.RetryBackoff()
+    while True:
+        try:
+            async with sessionmaker() as session:
+                report = await renewal_recovery.run_once(session, updater, backoff=backoff)
+            if report.changed:
+                await _subhub_sync(settings, "восстановление обычных продлений")
+        except Exception:  # noqa: BLE001 - фоновая задача не должна падать
+            logger.exception("Ошибка фонового восстановления обычных продлений")
         await asyncio.sleep(interval)
 
 
@@ -175,12 +194,21 @@ async def _expiry_notify_poller(bot: Bot, settings: Settings) -> None:
         await asyncio.sleep(interval)
 
 
-# Задачи worker'а очереди этого процесса: защита от второго запуска.
-_QUEUE_WORKER_TASKS: set[asyncio.Task] = set()
+# Единственные в процессе обработчики очередей: защита от второго запуска.
+_EXCLUSIVE_WORKERS: dict[str, set[asyncio.Task]] = {}
 
 
-def _queue_worker_alive() -> bool:
-    return any(not task.done() for task in _QUEUE_WORKER_TASKS)
+def _start_exclusive(
+    name: str, factory: Callable[[], Coroutine[Any, Any, None]]
+) -> asyncio.Task | None:
+    """Запускает worker, если такой ещё не работает в этом процессе."""
+    running = _EXCLUSIVE_WORKERS.setdefault(name, set())
+    if any(not task.done() for task in running):
+        return None
+    task = asyncio.create_task(factory())
+    running.add(task)
+    task.add_done_callback(running.discard)
+    return task
 
 
 def start_background_tasks(bot: Bot, settings: Settings) -> list[asyncio.Task]:
@@ -197,17 +225,24 @@ def start_background_tasks(bot: Bot, settings: Settings) -> list[asyncio.Task]:
             "Антишеринг-мониторинг включён, период сбора: %s мин",
             settings.anti_sharing_poll_minutes,
         )
-    # Один worker очереди на процесс, независимо от проверки серверов и сверки.
-    if _queue_worker_alive():
+    # Один worker каждой очереди на процесс, независимо от проверки серверов и сверки.
+    worker = _start_exclusive("whitelist", lambda: _whitelist_queue_worker(settings))
+    if worker is None:
         logger.warning("Очередь «Обход белых списков» уже обслуживается в этом процессе")
     else:
-        worker = asyncio.create_task(_whitelist_queue_worker(settings))
-        _QUEUE_WORKER_TASKS.add(worker)
-        worker.add_done_callback(_QUEUE_WORKER_TASKS.discard)
         tasks.append(worker)
         logger.info(
             "Очередь «Обход белых списков» включена, период опроса: %s c",
             settings.whitelist_queue_poll_seconds,
+        )
+    worker = _start_exclusive("renewal", lambda: _renewal_recovery_worker(settings))
+    if worker is None:
+        logger.warning("Восстановление обычных продлений уже работает в этом процессе")
+    else:
+        tasks.append(worker)
+        logger.info(
+            "Восстановление обычных продлений включено, период опроса: %s c",
+            settings.renewal_recovery_poll_seconds,
         )
     if settings.server_health_poll_seconds > 0:
         tasks.append(asyncio.create_task(_server_health_poller(settings)))

@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -377,6 +377,38 @@ class MappingRepository:
         return mapping
 
 
+def accepted_subscription_clause():
+    """Условие SQL: заявка — принятая администратором оплата подписки.
+
+    Принятие отделено от применения доступа. Оплата принята, когда сервис
+    зафиксировал решение администратора (``confirmed_at``/``target_expires_at``
+    ставятся одной транзакцией до обращения к панелям). Поэтому принятой считаются:
+
+    * ``confirmed`` и ``applied``;
+    * ``failed`` с ``confirmed_at`` или ``target_expires_at`` — сбой применения
+      после принятия (нет доступных привязок, панели отказали); повтор ведёт её в
+      ``applied`` без нового начисления.
+
+    Не принятая: ``created``/``waiting_admin``; ``rejected`` (в том числе
+    отклонённая после сбоя — это существующая семантика отказа, отдельного механизма
+    возврата в коде нет); ``failed`` до принятия (нет клиента и серверов — заявка
+    падает до фиксации срока); любая покупка трафика.
+    """
+    return and_(
+        PaymentRequest.kind == PAYMENT_KIND_SUBSCRIPTION,
+        or_(
+            PaymentRequest.status.in_([PaymentStatus.APPLIED, PaymentStatus.CONFIRMED]),
+            and_(
+                PaymentRequest.status == PaymentStatus.FAILED,
+                or_(
+                    PaymentRequest.confirmed_at.is_not(None),
+                    PaymentRequest.target_expires_at.is_not(None),
+                ),
+            ),
+        ),
+    )
+
+
 class PaymentRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -508,6 +540,24 @@ class PaymentRepository:
             .order_by(PaymentRequest.id.desc())
         )
         return result.scalars().first()
+
+    async def has_paid_subscription(self, user_id: int) -> bool:
+        """Оформлялась ли подписка: есть принятая оплата подписки (не трафика).
+
+        Принятая оплата — это решение администратора, а не результат применения:
+        заявка ``confirmed``/``applied`` либо ``failed`` с признаком принятия
+        (``confirmed_at`` или ``target_expires_at``; см. ``accepted_subscription_clause``).
+        Ожидающие, отклонённые, ``failed`` до принятия и покупки трафика в расчёт не
+        входят. Срок оплаченной подписки значения не имеет: истёкшая остаётся
+        оформленной.
+        """
+        found = await self.session.scalar(
+            select(PaymentRequest.id)
+            .where(PaymentRequest.user_id == user_id)
+            .where(accepted_subscription_clause())
+            .limit(1)
+        )
+        return found is not None
 
     async def history_for_user(self, user_id: int) -> list[PaymentRequest]:
         result = await self.session.execute(
@@ -683,6 +733,27 @@ class PendingServerUpdateRepository:
             ))
             .order_by(PendingServerUpdate.id.asc())
             .limit(100)
+        )
+        return list(result.scalars().all())
+
+    async def list_due_ids(self, *, limit: int = 100) -> list[int]:
+        """Ожидающие обновления, у которых истёк backoff, по всем серверам.
+
+        Записи отключённых серверов пропускаются (применятся после включения).
+        Записи удалённого сервера, если строки остались без каскада, попадают в
+        выборку и закрываются обработчиком.
+        """
+        result = await self.session.execute(
+            select(PendingServerUpdate.id)
+            .outerjoin(Server, Server.id == PendingServerUpdate.server_id)
+            .where(PendingServerUpdate.status == "pending")
+            .where(or_(Server.id.is_(None), Server.enabled.is_(True)))
+            .where(or_(
+                PendingServerUpdate.next_retry_at.is_(None),
+                PendingServerUpdate.next_retry_at <= _utcnow(),
+            ))
+            .order_by(PendingServerUpdate.id.asc())
+            .limit(limit)
         )
         return list(result.scalars().all())
 

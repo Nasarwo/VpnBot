@@ -241,17 +241,17 @@ class _Maker:
 
 
 @pytest.mark.parametrize(("recovered", "syncs"), [(1, 1), (0, 0)])
-async def test_health_poller_triggers_subhub_after_recovering_payment(
+async def test_recovery_worker_triggers_subhub_after_recovering_payment(
     monkeypatch, recovered, syncs
 ):
     from app import main as app_main
-    from app.services import health
+    from app.services import pending_updates
 
-    async def fake_recover(session, updater):
+    async def fake_recover(session, updater, **_kwargs):
         return recovered
 
-    async def fake_check(session, **kwargs):
-        return {}
+    async def fake_due(session, updater, **_kwargs):
+        return []
 
     async def stop(_seconds):  # конец первой итерации цикла
         raise asyncio.CancelledError
@@ -259,10 +259,9 @@ async def test_health_poller_triggers_subhub_after_recovering_payment(
     monkeypatch.setattr(app_main, "get_sessionmaker", lambda: _Maker())
     monkeypatch.setattr(app_main, "build_updater", lambda **_: object())
     monkeypatch.setattr(billing, "recover_confirmed_payments", fake_recover)
-    monkeypatch.setattr(health, "check_servers", fake_check)
+    monkeypatch.setattr(pending_updates, "process_due", fake_due)
     monkeypatch.setattr(app_main.asyncio, "sleep", stop)
     async with LocalSubHub() as hub:
-        settings = _settings(hub).model_copy(update={"server_health_poll_seconds": 60})
         with pytest.raises(asyncio.CancelledError):
-            await app_main._server_health_poller(settings)
+            await app_main._renewal_recovery_worker(_settings(hub))
         assert hub.syncs == syncs
