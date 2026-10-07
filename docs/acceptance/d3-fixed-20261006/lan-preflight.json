@@ -1,0 +1,16 @@
+[
+  {
+    "port": 52444,
+    "ok": true,
+    "download": "200 8388608"
+  },
+  {
+    "port": 52443,
+    "ok": true,
+    "download": "200 8388608"
+  },
+  {
+    "external_https": "200 577",
+    "ok": true
+  }
+]

@@ -1,0 +1,21 @@
+{
+  "snapshots": 14,
+  "whitelist_nodes": 15,
+  "matching_names_and_links": 15,
+  "matching_happ_remarks": 15,
+  "auto_whitelist_leaks": 0,
+  "ordinary_nodes": 411,
+  "ordinary_nodes_unchanged": true,
+  "persisted_after_restart": true,
+  "pilot_label": "🗒️ Белые списки (3.00/3Гб)",
+  "health": {
+    "status": "ok",
+    "database": "ok",
+    "scheduler": true,
+    "servers": {
+      "configured": 8,
+      "polled": 8,
+      "errors": 0
+    }
+  }
+}

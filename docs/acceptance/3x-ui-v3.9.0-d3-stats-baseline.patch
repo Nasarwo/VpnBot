@@ -1,21 +1,127 @@
+diff --git a/internal/web/job/xray_traffic_job.go b/internal/web/job/xray_traffic_job.go
+index 71c8127..7b0d918 100644
+--- a/internal/web/job/xray_traffic_job.go
++++ b/internal/web/job/xray_traffic_job.go
+@@ -77,15 +77,14 @@ func (j *XrayTrafficJob) Run() {
+ 	}
+ 	traffics, clientTraffics, err := j.xrayService.GetXrayTraffic()
+ 	if err != nil {
++		logger.Warning("collect and persist xray traffic failed:", err)
+ 		return
+ 	}
+-	needRestart0, clientsDisabled, err := j.inboundService.AddTraffic(traffics, clientTraffics)
++	// GetXrayTraffic has committed all deltas atomically. This pass performs
++	// expiry/quota maintenance only; submitting the deltas again would double usage.
++	needRestart0, clientsDisabled, err := j.inboundService.AddTraffic(nil, nil)
+ 	if err != nil {
+-		logger.Warning("add inbound traffic failed:", err)
+-	}
+-	err, needRestart1 := j.outboundService.AddTraffic(traffics, clientTraffics)
+-	if err != nil {
+-		logger.Warning("add outbound traffic failed:", err)
++		logger.Warning("xray traffic lifecycle maintenance failed:", err)
+ 	}
+ 	if clientsDisabled {
+ 		restartOnDisable, settingErr := j.settingService.GetRestartXrayOnClientDisable()
+@@ -105,7 +104,7 @@ func (j *XrayTrafficJob) Run() {
+ 	} else if err != nil {
+ 		logger.Warning("get ExternalTrafficInformEnable failed:", err)
+ 	}
+-	if needRestart0 || needRestart1 {
++	if needRestart0 {
+ 		j.xrayService.SetToNeedRestart()
+ 	}
+ 
+diff --git a/internal/web/service/outbound/outbound.go b/internal/web/service/outbound/outbound.go
+index 1e9ce2a..c631e90 100644
+--- a/internal/web/service/outbound/outbound.go
++++ b/internal/web/service/outbound/outbound.go
+@@ -24,11 +24,17 @@ type OutboundService struct{}
+ 
+ func (s *OutboundService) AddTraffic(traffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (error, bool) {
+ 	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
+-		return s.addOutboundTraffic(tx, traffics)
++		return s.AddTrafficTx(tx, traffics)
+ 	})
+ 	return err, false
+ }
+ 
++// AddTrafficTx participates in the caller's traffic transaction, allowing
++// inbound, client and outbound deltas to commit together before baseline advance.
++func (s *OutboundService) AddTrafficTx(tx *gorm.DB, traffics []*xray.Traffic) error {
++	return s.addOutboundTraffic(tx, traffics)
++}
++
+ // saturatingAdd caps counters at database.TrafficMax: unlike the SQL paths,
+ // this read-modify-write add happens in Go, where an int64 overflow silently
+ // wraps negative instead of erroring (#5762).
 diff --git a/internal/web/service/xray.go b/internal/web/service/xray.go
-index b34af4c0..f860494f 100644
+index b34af4c..64c5b5f 100644
 --- a/internal/web/service/xray.go
 +++ b/internal/web/service/xray.go
-@@ -1233,7 +1233,12 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic,
- 	}
- 	defer s.xrayAPI.Close()
+@@ -1218,27 +1218,19 @@ func stripDisabledRules(routerCfg json_util.RawMessage) json_util.RawMessage {
+ 	return out
+ }
  
-+	// Delta baselines belong to the core process, not to this service instance:
-+	// a restart by any XrayService replaces the process, whose counters and
-+	// baseline start at zero, and a panel-only restart keeps polling the same one.
-+	s.xrayAPI.StatsLastValues = process.StatsBaseline()
- 	traffic, clientTraffic, err := s.xrayAPI.GetTraffic()
-+	process.SetStatsBaseline(s.xrayAPI.StatsLastValues)
- 	if err != nil {
- 		logger.Debug("Failed to fetch Xray traffic:", err)
+-// GetXrayTraffic fetches the current traffic statistics from the running Xray process.
++// GetXrayTraffic collects and persists traffic before advancing the core baseline.
+ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
++	// RestartXray and StopXray use the same lock. Keep the process snapshot,
++	// API query and baseline update on one core even when its API port is reused.
++	lock.Lock()
++	defer lock.Unlock()
+ 	process := currentXrayProcess()
+ 	if process == nil || !process.IsRunning() {
+ 		err := errors.New("xray is not running")
+ 		logger.Debug("Attempted to fetch Xray traffic, but Xray is not running:", err)
  		return nil, nil, err
-@@ -1450,7 +1455,6 @@ func (s *XrayService) RestartXray(isForce bool) error {
+ 	}
+-	apiPort := process.GetAPIPort()
+-	if err := s.xrayAPI.Init(apiPort); err != nil {
+-		logger.Debug("Failed to initialize Xray API:", err)
+-		return nil, nil, err
+-	}
+-	defer s.xrayAPI.Close()
+-
+-	traffic, clientTraffic, err := s.xrayAPI.GetTraffic()
+-	if err != nil {
+-		logger.Debug("Failed to fetch Xray traffic:", err)
+-		return nil, nil, err
+-	}
+-	return traffic, clientTraffic, nil
++	return s.collectXrayTrafficLocked(process)
+ }
+ 
+ // GetOnlineUsers returns connection-based online users (email + source IPs)
+@@ -1441,7 +1433,26 @@ func (s *XrayService) RestartXray(isForce bool) error {
+ 			logger.Info("Xray config changes applied through the core API, no restart needed")
+ 			return nil
+ 		}
+-		_ = process.Stop()
++		if err := s.flushXrayTrafficLocked(process); err != nil {
++			return err
++		}
++		// The final sample may exhaust a quota or start a delayed expiry. Rebuild
++		// from the committed rows so the replacement core gets current limits.
++		xrayConfig, err = s.GetXrayConfig()
++		if err != nil {
++			return err
++		}
++		if conflicts := bindConflicts(xrayConfig, process.GetConfig()); len(conflicts) > 0 {
++			return fmt.Errorf("xray config refused after traffic flush: %s", conflicts[0])
++		}
++		// Configuration generation can take time while connections still move
++		// bytes. Take another sample immediately before sending the stop signal.
++		if err := s.flushXrayTrafficLocked(process); err != nil {
++			return err
++		}
++		if err := process.Stop(); err != nil {
++			return fmt.Errorf("stop xray before replacement: %w", err)
++		}
+ 	} else if conflicts := bindConflicts(xrayConfig, nil); len(conflicts) > 0 {
+ 		// Nothing is running to protect and the core is the authority on what it
+ 		// can bind: start it and let its own error name the port it lost.
+@@ -1450,7 +1461,6 @@ func (s *XrayService) RestartXray(isForce bool) error {
  
  	process = xray.NewProcess(xrayConfig)
  	xrayState.replace(process)
@@ -23,8 +129,157 @@ index b34af4c0..f860494f 100644
  	err = process.Start()
  	if err != nil {
  		return err
+@@ -1622,13 +1632,30 @@ func addOutboundReconciling(api *xray.XrayAPI, outbound []byte) error {
+ 
+ // StopXray stops the running Xray process.
+ func (s *XrayService) StopXray() error {
++	return s.stopXray(false)
++}
++
++// StopXrayForShutdown still stops the child on panel exit when collection
++// fails, avoiding an orphaned VPN core. It reports the accounting failure.
++func (s *XrayService) StopXrayForShutdown() error {
++	return s.stopXray(true)
++}
++
++func (s *XrayService) stopXray(shutdown bool) error {
+ 	lock.Lock()
+ 	defer lock.Unlock()
+-	isManuallyStopped.Store(true)
+ 	logger.Debug("Attempting to stop Xray...")
+ 	process := currentXrayProcess()
+ 	if process != nil && process.IsRunning() {
+-		return process.Stop()
++		flushErr := s.flushXrayTrafficLocked(process)
++		if flushErr != nil && !shutdown {
++			return flushErr
++		}
++		if flushErr != nil {
++			logger.Error("xray shutdown traffic remains unconfirmed:", flushErr)
++		}
++		isManuallyStopped.Store(true)
++		return errors.Join(flushErr, process.Stop())
+ 	}
+ 	return errors.New("xray is not running")
+ }
+diff --git a/internal/web/service/xray_traffic.go b/internal/web/service/xray_traffic.go
+new file mode 100644
+index 0000000..b2b4c00
+--- /dev/null
++++ b/internal/web/service/xray_traffic.go
+@@ -0,0 +1,52 @@
++package service
++
++import (
++	"fmt"
++	"maps"
++
++	"github.com/mhsanaei/3x-ui/v3/internal/web/service/outbound"
++	"github.com/mhsanaei/3x-ui/v3/internal/xray"
++
++	"gorm.io/gorm"
++)
++
++// collectXrayTrafficLocked samples and durably commits one process's deltas.
++// The caller holds the lifecycle lock through sampling, commit and baseline
++// advancement. Runtime maintenance is deliberately excluded: it can itself
++// request a restart and belongs to the traffic job after this returns.
++func (s *XrayService) collectXrayTrafficLocked(process *xray.Process) ([]*xray.Traffic, []*xray.ClientTraffic, error) {
++	api := xray.XrayAPI{StatsLastValues: maps.Clone(process.StatsBaseline())}
++	if err := api.Init(process.GetAPIPort()); err != nil {
++		return nil, nil, err
++	}
++	defer api.Close()
++	traffics, clients, err := api.GetTraffic()
++	if err != nil {
++		return nil, nil, err
++	}
++	var outboundService outbound.OutboundService
++	err = runSerializedTx(func(tx *gorm.DB) error {
++		if err := s.inboundService.addInboundTraffic(tx, traffics); err != nil {
++			return err
++		}
++		if err := s.inboundService.addClientTraffic(tx, clients); err != nil {
++			return err
++		}
++		return outboundService.AddTrafficTx(tx, traffics)
++	})
++	if err != nil {
++		// Neither the core counters nor the committed baseline have changed:
++		// the next poll can retry the whole delta without recounting a partial tx.
++		return nil, nil, fmt.Errorf("persist xray traffic: %w", err)
++	}
++	process.SetStatsBaseline(api.StatsLastValues)
++	return traffics, clients, nil
++}
++
++func (s *XrayService) flushXrayTrafficLocked(process *xray.Process) error {
++	_, _, err := s.collectXrayTrafficLocked(process)
++	if err != nil {
++		return fmt.Errorf("final xray traffic collection failed: %w", err)
++	}
++	return nil
++}
+diff --git a/internal/web/service/xray_traffic_lifecycle_test.go b/internal/web/service/xray_traffic_lifecycle_test.go
+new file mode 100644
+index 0000000..d315933
+--- /dev/null
++++ b/internal/web/service/xray_traffic_lifecycle_test.go
+@@ -0,0 +1,39 @@
++package service
++
++import (
++	"testing"
++	"time"
++)
++
++// A traffic query must not reach the API while RestartXray/StopXray holds
++// the lifecycle lock: the same API port may already belong to a new core.
++func TestGetXrayTrafficWaitsForLifecycleOperation(t *testing.T) {
++	lock.Lock()
++	locked := true
++	defer func() {
++		if locked {
++			lock.Unlock()
++		}
++	}()
++	started := make(chan struct{})
++	done := make(chan struct{})
++	go func() {
++		close(started)
++		service := XrayService{}
++		_, _, _ = service.GetXrayTraffic()
++		close(done)
++	}()
++	<-started
++	select {
++	case <-done:
++		t.Fatal("traffic query bypassed the lifecycle lock")
++	case <-time.After(50 * time.Millisecond):
++	}
++	lock.Unlock()
++	locked = false
++	select {
++	case <-done:
++	case <-time.After(2 * time.Second):
++		t.Fatal("traffic query did not resume after lifecycle operation")
++	}
++}
+diff --git a/internal/web/web.go b/internal/web/web.go
+index 8d0b505..5639b6f 100644
+--- a/internal/web/web.go
++++ b/internal/web/web.go
+@@ -812,7 +812,7 @@ func (s *Server) stop(stopXray bool, stopTgBot bool) error {
+ 		amneziawgnet.GetOutboundManager().StopAll()
+ 	}
+ 	if stopXray {
+-		if err := s.xrayService.StopXray(); err != nil {
++		if err := s.xrayService.StopXrayForShutdown(); err != nil {
+ 			err2 = common.Combine(err2, err)
+ 		}
+ 	}
 diff --git a/internal/xray/api.go b/internal/xray/api.go
-index b43e4f8b..39004d0b 100644
+index b43e4f8..39004d0 100644
 --- a/internal/xray/api.go
 +++ b/internal/xray/api.go
 @@ -55,7 +55,9 @@ type XrayAPI struct {
@@ -79,7 +334,7 @@ index b43e4f8b..39004d0b 100644
  	for _, stat := range resp.GetStat() {
  		lastValue, ok := x.StatsLastValues[stat.Name]
 diff --git a/internal/xray/api_traffic_test.go b/internal/xray/api_traffic_test.go
-index 8682356b..f189ad07 100644
+index 8682356..f189ad0 100644
 --- a/internal/xray/api_traffic_test.go
 +++ b/internal/xray/api_traffic_test.go
 @@ -190,3 +190,47 @@ func TestGetTrafficSkipsAPIInboundAndPrunes(t *testing.T) {
@@ -131,7 +386,7 @@ index 8682356b..f189ad07 100644
 +	}
 +}
 diff --git a/internal/xray/process.go b/internal/xray/process.go
-index a7f0691e..c924d0f5 100644
+index a7f0691..c924d0f 100644
 --- a/internal/xray/process.go
 +++ b/internal/xray/process.go
 @@ -189,6 +189,16 @@ type process struct {
@@ -179,7 +434,7 @@ index a7f0691e..c924d0f5 100644
  	xrayForceStopTimeout    = 2 * time.Second
 diff --git a/internal/xray/process_stats_baseline_test.go b/internal/xray/process_stats_baseline_test.go
 new file mode 100644
-index 00000000..bab9b07a
+index 0000000..bab9b07
 --- /dev/null
 +++ b/internal/xray/process_stats_baseline_test.go
 @@ -0,0 +1,23 @@

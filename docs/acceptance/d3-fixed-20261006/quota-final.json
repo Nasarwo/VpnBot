@@ -1,0 +1,306 @@
+{
+ "checks": [
+  {
+   "section": "Исходная подписка и реальный трафик",
+   "name": "одна ссылка подписки: обычный и whitelist-конфиг",
+   "ok": true,
+   "detail": "конфигов 2"
+  },
+  {
+   "section": "Исходная подписка и реальный трафик",
+   "name": "обычный конфиг передаёт трафик",
+   "ok": true,
+   "detail": "200 8388608"
+  },
+  {
+   "section": "Исходная подписка и реальный трафик",
+   "name": "whitelist-конфиг передаёт трафик",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "Исходная подписка и реальный трафик",
+   "name": "панель учла расход whitelist-клиента",
+   "ok": true,
+   "detail": "up+down=8388952"
+  },
+  {
+   "section": "Исходная подписка и реальный трафик",
+   "name": "up/down приходят в clientStats, а не в settings.clients",
+   "ok": true,
+   "detail": "{'inbound': 1, 'settings.enable': True, 'settings.totalGB': 1073741824, 'settings.expiryTime': 0, 'settings has up/down': False, 'clientStats.up+down': 8388952, 'clientStats.total': 1073741824, 'clientStats.enable': True}"
+  },
+  {
+   "section": "Остановка Xray whitelist-панели (снятие маскирующего enable=false)",
+   "name": "Xray whitelist-панели остановлен",
+   "ok": true,
+   "detail": "stop"
+  },
+  {
+   "section": "на границе: totalGB = U, enable=true",
+   "name": "whitelist-конфиг скрыт",
+   "ok": true,
+   "detail": "в подписке: False"
+  },
+  {
+   "section": "на границе: totalGB = U, enable=true",
+   "name": "обычный безлимитный конфиг в подписке",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "на границе: totalGB = U, enable=true",
+   "name": "токен подписки не изменился",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "ниже квоты: totalGB = U + 1",
+   "name": "whitelist-конфиг в подписке",
+   "ok": true,
+   "detail": "в подписке: True"
+  },
+  {
+   "section": "ниже квоты: totalGB = U + 1",
+   "name": "обычный безлимитный конфиг в подписке",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "ниже квоты: totalGB = U + 1",
+   "name": "токен подписки не изменился",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "выше квоты: totalGB = U − 1",
+   "name": "whitelist-конфиг скрыт",
+   "ok": true,
+   "detail": "в подписке: False"
+  },
+  {
+   "section": "выше квоты: totalGB = U − 1",
+   "name": "обычный безлимитный конфиг в подписке",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "выше квоты: totalGB = U − 1",
+   "name": "токен подписки не изменился",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "безлимит: totalGB = 0",
+   "name": "whitelist-конфиг в подписке",
+   "ok": true,
+   "detail": "в подписке: True"
+  },
+  {
+   "section": "безлимит: totalGB = 0",
+   "name": "обычный безлимитный конфиг в подписке",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "безлимит: totalGB = 0",
+   "name": "токен подписки не изменился",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "enable=false при остатке (totalGB = U + 1 ГиБ)",
+   "name": "whitelist-конфиг скрыт",
+   "ok": true,
+   "detail": "в подписке: False"
+  },
+  {
+   "section": "enable=false при остатке (totalGB = U + 1 ГиБ)",
+   "name": "обычный безлимитный конфиг в подписке",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "enable=false при остатке (totalGB = U + 1 ГиБ)",
+   "name": "токен подписки не изменился",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "истёкший срок, enable=true, totalGB = 0",
+   "name": "whitelist-конфиг скрыт",
+   "ok": true,
+   "detail": "в подписке: False"
+  },
+  {
+   "section": "истёкший срок, enable=true, totalGB = 0",
+   "name": "обычный безлимитный конфиг в подписке",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "истёкший срок, enable=true, totalGB = 0",
+   "name": "токен подписки не изменился",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "восстановление: totalGB = U + 1 ГиБ, срок 0",
+   "name": "whitelist-конфиг в подписке",
+   "ok": true,
+   "detail": "в подписке: True"
+  },
+  {
+   "section": "восстановление: totalGB = U + 1 ГиБ, срок 0",
+   "name": "обычный безлимитный конфиг в подписке",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "восстановление: totalGB = U + 1 ГиБ, срок 0",
+   "name": "токен подписки не изменился",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "section": "Контрольный пример: totalGB=10737418240, up+down=10737418240, enable=true",
+   "name": "панель хранит пример без enable=false",
+   "ok": true,
+   "detail": "{'inbound': 2, 'settings.enable': True, 'settings.totalGB': 10737418240, 'settings.expiryTime': 0, 'settings has up/down': False, 'clientStats.up+down': 10737418240, 'clientStats.total': 10737418240, 'clientStats.enable': True}"
+  },
+  {
+   "section": "Контрольный пример: totalGB=10737418240, up+down=10737418240, enable=true",
+   "name": "исчерпанный клиент контрольного примера скрыт",
+   "ok": true,
+   "detail": "конфигов 0"
+  },
+  {
+   "section": "Контрольный пример: totalGB=10737418240, up+down=10737418240, enable=true",
+   "name": "resolve: подписка без активных конфигов (409)",
+   "ok": true,
+   "detail": "HTTP 409"
+  },
+  {
+   "section": "Контрольный пример: totalGB=10737418240, up+down=10737418240, enable=true",
+   "name": "после увеличения квоты на 1 байт конфиг возвращается по той же ссылке",
+   "ok": true,
+   "detail": "конфигов 1"
+  },
+  {
+   "section": "Маскирующее условие при работающем Xray (справочно)",
+   "name": "работающая панель сама выставляет enable=false исчерпанному клиенту",
+   "ok": true,
+   "detail": "{'inbound': 2, 'settings.enable': False, 'settings.totalGB': 10737418240, 'settings.expiryTime': 0, 'settings has up/down': False, 'clientStats.up+down': 10737418240, 'clientStats.total': 10737418240, 'clientStats.enable': False}"
+  }
+ ],
+ "known_defects": [
+  {
+   "section": "Исходная подписка и реальный трафик",
+   "code": "D-3",
+   "name": "первый трафик через whitelist-панель после подготовки стенда: трафик учтён панелью",
+   "reproduced": false,
+   "detail": "загрузка 200 8388608 через 6.8 с после запуска Xray; Xray +8388952 Б, панель +8388952 Б, не учтено 0 Б"
+  }
+ ],
+ "warmups": [],
+ "facts": {
+  "3x-ui": "3.9.0",
+  "SubHub в контейнере (sha256)": {
+   "app/link_builder.py": "b5152bc1b373",
+   "app/normalizer.py": "82bcd8c3e6d7",
+   "app/models.py": "a0fe34791fdf"
+  },
+  "inbounds/list при работающем Xray": {
+   "inbound": 1,
+   "settings.enable": true,
+   "settings.totalGB": 1073741824,
+   "settings.expiryTime": 0,
+   "settings has up/down": false,
+   "clientStats.up+down": 8388952,
+   "clientStats.total": 1073741824,
+   "clientStats.enable": true
+  },
+  "U = up+down whitelist-клиента": 8388952,
+  "панель: на границе: totalGB = U, enable=true": {
+   "inbound": 1,
+   "settings.enable": true,
+   "settings.totalGB": 8388952,
+   "settings.expiryTime": 0,
+   "settings has up/down": false,
+   "clientStats.up+down": 8388952,
+   "clientStats.total": 8388952,
+   "clientStats.enable": true
+  },
+  "панель: ниже квоты: totalGB = U + 1": {
+   "inbound": 1,
+   "settings.enable": true,
+   "settings.totalGB": 8388953,
+   "settings.expiryTime": 0,
+   "settings has up/down": false,
+   "clientStats.up+down": 8388952,
+   "clientStats.total": 8388953,
+   "clientStats.enable": true
+  },
+  "панель: выше квоты: totalGB = U − 1": {
+   "inbound": 1,
+   "settings.enable": true,
+   "settings.totalGB": 8388951,
+   "settings.expiryTime": 0,
+   "settings has up/down": false,
+   "clientStats.up+down": 8388952,
+   "clientStats.total": 8388951,
+   "clientStats.enable": true
+  },
+  "панель: безлимит: totalGB = 0": {
+   "inbound": 1,
+   "settings.enable": true,
+   "settings.totalGB": 0,
+   "settings.expiryTime": 0,
+   "settings has up/down": false,
+   "clientStats.up+down": 8388952,
+   "clientStats.total": 0,
+   "clientStats.enable": true
+  },
+  "панель: enable=false при остатке (totalGB = U + 1 ГиБ)": {
+   "inbound": 1,
+   "settings.enable": false,
+   "settings.totalGB": 1082130776,
+   "settings.expiryTime": 0,
+   "settings has up/down": false,
+   "clientStats.up+down": 8388952,
+   "clientStats.total": 1082130776,
+   "clientStats.enable": false
+  },
+  "панель: истёкший срок, enable=true, totalGB = 0": {
+   "inbound": 1,
+   "settings.enable": true,
+   "settings.totalGB": 0,
+   "settings.expiryTime": 1791204018610,
+   "settings has up/down": false,
+   "clientStats.up+down": 8388952,
+   "clientStats.total": 0,
+   "clientStats.enable": true
+  },
+  "панель: восстановление: totalGB = U + 1 ГиБ, срок 0": {
+   "inbound": 1,
+   "settings.enable": true,
+   "settings.totalGB": 1082130776,
+   "settings.expiryTime": 0,
+   "settings has up/down": false,
+   "clientStats.up+down": 8388952,
+   "clientStats.total": 1082130776,
+   "clientStats.enable": true
+  },
+  "панель: контрольный пример": {
+   "inbound": 2,
+   "settings.enable": true,
+   "settings.totalGB": 10737418240,
+   "settings.expiryTime": 0,
+   "settings has up/down": false,
+   "clientStats.up+down": 10737418240,
+   "clientStats.total": 10737418240,
+   "clientStats.enable": true
+  },
+  "inbound контрольного примера": 2
+ }
+}

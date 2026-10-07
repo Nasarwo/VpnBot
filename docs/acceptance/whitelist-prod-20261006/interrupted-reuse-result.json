@@ -1,0 +1,15 @@
+{
+  "checks": {
+    "periodic_accounting": true,
+    "final_flush_restart": true,
+    "restart_counters_empty": true,
+    "no_double_accounting": true,
+    "synthetic_client_removed": true
+  },
+  "synthetic_email": "codex-acceptance-e8fa1bd161",
+  "bytes_received": 2097152,
+  "periodic_core_bytes": 2097356,
+  "periodic_panel_bytes": 2097356,
+  "restart_core_delta": 2097356,
+  "restart_panel_delta": 2097356
+}

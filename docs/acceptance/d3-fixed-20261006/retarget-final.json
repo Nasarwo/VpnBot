@@ -1,0 +1,157 @@
+{
+  "checks": [
+    {
+      "section": "Initial placement and real traffic",
+      "name": "Initial owned binding",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Initial placement and real traffic",
+      "name": "Paid package credited exactly once",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Initial placement and real traffic",
+      "name": "Initial VLESS configuration transfers 8 MiB",
+      "ok": true,
+      "detail": "200 8388608"
+    },
+    {
+      "section": "Initial placement and real traffic",
+      "name": "Panel accounted real traffic",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real transfer and subscription update",
+      "name": "Only new binding remains; placement confirmed",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real transfer and subscription update",
+      "name": "Identity preserved",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real transfer and subscription update",
+      "name": "Subscription expiry preserved",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real transfer and subscription update",
+      "name": "Transfer grants no extra free or purchased traffic",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real transfer and subscription update",
+      "name": "Subscription token unchanged",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real transfer and subscription update",
+      "name": "SubHub publishes new port only",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real transfer and subscription update",
+      "name": "New VLESS configuration transfers 8 MiB",
+      "ok": true,
+      "detail": "200 8388608"
+    },
+    {
+      "section": "Lost acknowledgement and fresh DB connection",
+      "name": "Recovery target selected without applying its queue",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Lost acknowledgement and fresh DB connection",
+      "name": "Real detach completed but result remains pending",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Lost acknowledgement and fresh DB connection",
+      "name": "Queue recovers after lost detach acknowledgement",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Lost acknowledgement and fresh DB connection",
+      "name": "Repeat queue is idempotent",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Lost acknowledgement and fresh DB connection",
+      "name": "Recovery preserves paid package and its single ledger entry",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real queue worker with health polling and reconciliation disabled",
+      "name": "SubHub baseline is the confirmed recovery port",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real queue worker with health polling and reconciliation disabled",
+      "name": "Unavailable panel defers transfer",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real queue worker with health polling and reconciliation disabled",
+      "name": "Only the real queue worker starts",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real queue worker with health polling and reconciliation disabled",
+      "name": "Worker recovers placement and updates SubHub without admin commands",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Real queue worker with health polling and reconciliation disabled",
+      "name": "Worker recovery preserves paid package",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Manual block and expired subscription during transfer",
+      "name": "Moving a blocked client does not enable it",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Manual block and expired subscription during transfer",
+      "name": "Explicit unblock applies to new placement",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Manual block and expired subscription during transfer",
+      "name": "Moving an expired client does not enable it",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "section": "Manual block and expired subscription during transfer",
+      "name": "Whitelist transfer leaves ordinary identity intact",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "known_defects": [],
+  "warmups": [],
+  "facts": {}
+}

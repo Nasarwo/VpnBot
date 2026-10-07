@@ -1,0 +1,9 @@
+{
+  "device_confirmation": "User confirms both configurations work in Android Happ 4.6.0 over Wi-Fi",
+  "panel_used_bytes": 15094174,
+  "free_before": 10737418240,
+  "free_after": 10722324066,
+  "paid_after": 0,
+  "accounting_matches": true,
+  "attribution": "Includes CLI preflight traffic; phone-only volume is not isolated."
+}

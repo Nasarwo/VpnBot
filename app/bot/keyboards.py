@@ -87,7 +87,7 @@ def cancel_payment_keyboard() -> InlineKeyboardMarkup:
 
 def _whitelist_button() -> InlineKeyboardButton:
     return _btn(
-        texts.BTN_WHITELIST,
+        texts.BTN_WHITELIST_TRAFFIC,
         callback_data=WhitelistCallback(action="home").pack(),
         style="success",
         icon="connect",

@@ -32,10 +32,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import asyncpg
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 ROOT = Path(__file__).resolve().parents[2]
 PRE_WHITELIST = "f9b2c3d4e5f6"
-HEAD = "e2f3a4b5c6d7"
+HEAD = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini"))).get_current_head()
+if HEAD is None:
+    raise RuntimeError("No migration head found")
 GIB = 1024**3
 
 # Таблицы и столбцы, существовавшие до услуги: их содержимое миграция
@@ -208,6 +212,14 @@ async def verify_head(base: str, db: str, before: dict[str, tuple[int, str]], la
           after["alembic_version"][1])
     conn = await asyncpg.connect(plain(dsn(base, db)))
     try:
+        columns = {r[0] for r in await conn.fetch(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name='whitelist_accounts'")}
+        check(f"{label}: столбцы наблюдения расхода и размещения созданы",
+              {"usage_observed_bytes", "placement_server_id", "placement_inbound_id",
+               "placement_flow", "placement_at"}.issubset(columns))
+        check(f"{label}: реестр размещений пуст",
+              await conn.fetchval("SELECT count(*) FROM whitelist_placements") == 0)
         purposes = await conn.fetch("SELECT DISTINCT purpose FROM servers")
         check(f"{label}: старые серверы → standard",
               [r[0] for r in purposes] == ["standard"], str([r[0] for r in purposes]))
@@ -463,7 +475,7 @@ async def main() -> int:
 
     # Шаг 3 runbook: миграция.
     out = alembic(args.url, prod, "upgrade", "head")
-    check("alembic upgrade head: три ревизии услуги",
+    check("alembic upgrade head: ревизии услуги",
           all(rev in out for rev in ("b7c8d9e0f1a2", "d1e2f3a4b5c6", HEAD)))
     await verify_head(args.url, prod, original, "prod_sim")
     await verify_single_whitelist_index(args.url, prod)

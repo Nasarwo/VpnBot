@@ -1,0 +1,24 @@
+{
+  "checks": {
+    "periodic_accounting": true,
+    "final_flush_restart": true,
+    "restart_counters_empty": true,
+    "no_double_accounting": true,
+    "final_flush_panel_shutdown": false,
+    "panel_active_after_restart": true,
+    "connection_after_panel_restart": true,
+    "quota_disables_client": true,
+    "quota_rejects_connection": true,
+    "expiry_disables_client": true,
+    "expiry_rejects_connection": true,
+    "synthetic_client_removed": true
+  },
+  "synthetic_email": "codex-acceptance-5f189d4b43",
+  "bytes_received": 2097152,
+  "periodic_core_bytes": 2097356,
+  "periodic_panel_bytes": 2097356,
+  "restart_core_delta": 2097356,
+  "restart_panel_delta": 2097356,
+  "shutdown_core_delta": 2097356,
+  "shutdown_panel_delta": 0
+}

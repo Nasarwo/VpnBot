@@ -367,7 +367,7 @@ async def import_inbounds(
 
 
 async def fetch_inbounds(server: Server, timeout: float = 15.0) -> list[dict[str, Any]]:
-    """Читает список inbound'ов панели (``inbounds/list``) как есть."""
+    """Read inventory and external Hosts needed for whitelist XHTTP links."""
     async with XuiClient(
         base_url=server.panel_url,
         username=server.username,
@@ -375,7 +375,21 @@ async def fetch_inbounds(server: Server, timeout: float = 15.0) -> list[dict[str
         timeout=timeout,
     ) as client:
         try:
-            return await client.list_inbounds()
+            inbounds = await client.list_inbounds()
+            if server.purpose == "whitelist":
+                for raw in inbounds:
+                    stream = raw.get("streamSettings") or {}
+                    if isinstance(stream, str):
+                        try:
+                            stream = json.loads(stream)
+                        except ValueError as exc:
+                            raise XuiError("Некорректный streamSettings inbound") from exc
+                    if not isinstance(stream, dict):
+                        raise XuiError("Некорректный streamSettings inbound")
+                    if (raw.get("protocol") == "vless" and stream.get("network") == "xhttp"
+                            and stream.get("security", "none") != "reality"):
+                        raw["subscriptionHosts"] = await client.list_inbound_hosts(int(raw["id"]))
+            return inbounds
         except XuiError as exc:
             raise PanelUpdateError(str(exc)) from exc
 

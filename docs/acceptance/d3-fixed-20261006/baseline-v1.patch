@@ -1,0 +1,208 @@
+diff --git a/internal/web/service/xray.go b/internal/web/service/xray.go
+index b34af4c0..f860494f 100644
+--- a/internal/web/service/xray.go
++++ b/internal/web/service/xray.go
+@@ -1233,7 +1233,12 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic,
+ 	}
+ 	defer s.xrayAPI.Close()
+ 
++	// Delta baselines belong to the core process, not to this service instance:
++	// a restart by any XrayService replaces the process, whose counters and
++	// baseline start at zero, and a panel-only restart keeps polling the same one.
++	s.xrayAPI.StatsLastValues = process.StatsBaseline()
+ 	traffic, clientTraffic, err := s.xrayAPI.GetTraffic()
++	process.SetStatsBaseline(s.xrayAPI.StatsLastValues)
+ 	if err != nil {
+ 		logger.Debug("Failed to fetch Xray traffic:", err)
+ 		return nil, nil, err
+@@ -1450,7 +1455,6 @@ func (s *XrayService) RestartXray(isForce bool) error {
+ 
+ 	process = xray.NewProcess(xrayConfig)
+ 	xrayState.replace(process)
+-	s.xrayAPI.StatsLastValues = nil
+ 	err = process.Start()
+ 	if err != nil {
+ 		return err
+diff --git a/internal/xray/api.go b/internal/xray/api.go
+index b43e4f8b..39004d0b 100644
+--- a/internal/xray/api.go
++++ b/internal/xray/api.go
+@@ -55,7 +55,9 @@ type XrayAPI struct {
+ 	RoutingServiceClient *routerService.RoutingServiceClient
+ 	grpcClient           *grpc.ClientConn
+ 	isConnected          bool
+-	StatsLastValues      map[string]int64
++	// StatsLastValues is the delta baseline of GetTraffic. nil means nothing is
++	// known about the counters; a non-nil map, even an empty one, is counted from.
++	StatsLastValues map[string]int64
+ }
+ 
+ func getRequiredUserString(user map[string]any, key string) (string, error) {
+@@ -100,9 +102,6 @@ func (x *XrayAPI) Init(apiPort int) error {
+ 
+ 	x.grpcClient = conn
+ 	x.isConnected = true
+-	if x.StatsLastValues == nil {
+-		x.StatsLastValues = make(map[string]int64)
+-	}
+ 
+ 	hsClient := command.NewHandlerServiceClient(conn)
+ 	ssClient := statsService.NewStatsServiceClient(conn)
+@@ -778,11 +777,12 @@ func (x *XrayAPI) RemoveUser(inboundTag, email string) error {
+ 
+ // GetTraffic queries traffic statistics from the Xray core and reports what
+ // accrued since the previous call; the counters themselves are never reset.
+-// The first call of a process only records baselines, since it may be reading
+-// counters that already hold traffic the panel cannot attribute. After that a
+-// name the panel has not seen — xray creates a counter on a user's first use —
+-// and a counter that moved backwards because the core restarted both count
+-// from zero, so no client's traffic is dropped for a whole polling interval.
++// With a nil StatsLastValues nothing is known about the counters — they may
++// already hold traffic the caller cannot attribute — so that call only records
++// baselines. A non-nil baseline, empty for a core whose counters started at
++// zero, is counted from: a name it lacks — xray creates a counter on a user's
++// first use — and a counter that moved backwards both count from zero, so no
++// client's traffic is dropped for a whole polling interval.
+ func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
+ 	if x.grpcClient == nil {
+ 		return nil, nil, common.NewError("xray api is not initialized")
+@@ -804,7 +804,10 @@ func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
+ 	tagTrafficMap := make(map[string]*Traffic)
+ 	emailTrafficMap := make(map[string]*ClientTraffic)
+ 
+-	baselinePass := len(x.StatsLastValues) == 0
++	baselinePass := x.StatsLastValues == nil
++	if baselinePass {
++		x.StatsLastValues = make(map[string]int64)
++	}
+ 
+ 	for _, stat := range resp.GetStat() {
+ 		lastValue, ok := x.StatsLastValues[stat.Name]
+diff --git a/internal/xray/api_traffic_test.go b/internal/xray/api_traffic_test.go
+index 8682356b..f189ad07 100644
+--- a/internal/xray/api_traffic_test.go
++++ b/internal/xray/api_traffic_test.go
+@@ -190,3 +190,47 @@ func TestGetTrafficSkipsAPIInboundAndPrunes(t *testing.T) {
+ 		t.Fatal("baselines for stats that no longer exist were not pruned")
+ 	}
+ }
++
++// TestGetTrafficCountsFromEmptyKnownBaseline is the regression for the first
++// traffic after a core (re)start being dropped: the panel started that core, so
++// its counters began at zero and an empty, non-nil baseline counts every byte.
++func TestGetTrafficCountsFromEmptyKnownBaseline(t *testing.T) {
++	api := startFakeStats(t, [][]*statsService.Stat{
++		{stat("user>>>alice>>>traffic>>>downlink", 8388608)},
++	})
++	api.StatsLastValues = map[string]int64{}
++
++	_, clients, err := api.GetTraffic()
++	if err != nil {
++		t.Fatalf("GetTraffic: %v", err)
++	}
++	alice := clientTrafficByEmail(t, clients)["alice"]
++	if alice == nil || alice.Down != 8388608 {
++		t.Fatalf("first poll of a fresh core reported %+v, want down=8388608", alice)
++	}
++}
++
++// TestGetTrafficSharedBaselineDoesNotRecount pins the panel-only restart: a new
++// poller that inherits the core's baseline reports only what accrued after it.
++func TestGetTrafficSharedBaselineDoesNotRecount(t *testing.T) {
++	rounds := [][]*statsService.Stat{
++		{stat("user>>>alice>>>traffic>>>downlink", 1000)},
++		{stat("user>>>alice>>>traffic>>>downlink", 1500)},
++	}
++	first := startFakeStats(t, rounds[:1])
++	first.StatsLastValues = map[string]int64{}
++	if _, _, err := first.GetTraffic(); err != nil {
++		t.Fatalf("GetTraffic: %v", err)
++	}
++
++	second := startFakeStats(t, rounds[1:])
++	second.StatsLastValues = first.StatsLastValues
++	_, clients, err := second.GetTraffic()
++	if err != nil {
++		t.Fatalf("GetTraffic: %v", err)
++	}
++	alice := clientTrafficByEmail(t, clients)["alice"]
++	if alice == nil || alice.Down != 500 {
++		t.Fatalf("inherited baseline reported %+v, want down=500", alice)
++	}
++}
+diff --git a/internal/xray/process.go b/internal/xray/process.go
+index a7f0691e..c924d0f5 100644
+--- a/internal/xray/process.go
++++ b/internal/xray/process.go
+@@ -189,6 +189,16 @@ type process struct {
+ 	// lazily by the first caller.
+ 	onlineAPISupport atomic.Int32
+ 
++	// statsBaseline holds the stats counter values the traffic poll has already
++	// accounted for on this core. It lives with the process for the same reason
++	// as onlineAPISupport: every restart creates a new process whose counters
++	// start at zero, so its baseline starts empty and every byte counts, while
++	// a panel-only restart (SIGHUP) keeps polling the same core from where the
++	// previous poll left off. Only the traffic job uses it, and cron never runs
++	// that job concurrently with itself.
++	statsBaselineMu sync.Mutex
++	statsBaseline   map[string]int64
++
+ 	config     *Config
+ 	configPath string // if set, use this path instead of GetConfigPath() and remove on Stop
+ 	logWriter  *LogWriter
+@@ -221,6 +231,25 @@ func (p *process) SetOnlineAPISupport(v OnlineAPISupport) {
+ 	p.onlineAPISupport.Store(int32(v))
+ }
+ 
++// StatsBaseline returns the counter values already accounted for on this
++// process. The map is never nil: an empty one means nothing has been polled
++// yet, and since the panel started this core every counter began at zero.
++func (p *process) StatsBaseline() map[string]int64 {
++	p.statsBaselineMu.Lock()
++	defer p.statsBaselineMu.Unlock()
++	if p.statsBaseline == nil {
++		p.statsBaseline = make(map[string]int64)
++	}
++	return p.statsBaseline
++}
++
++// SetStatsBaseline stores the counter values accounted for by the latest poll.
++func (p *process) SetStatsBaseline(values map[string]int64) {
++	p.statsBaselineMu.Lock()
++	defer p.statsBaselineMu.Unlock()
++	p.statsBaseline = values
++}
++
+ var (
+ 	xrayGracefulStopTimeout = 5 * time.Second
+ 	xrayForceStopTimeout    = 2 * time.Second
+diff --git a/internal/xray/process_stats_baseline_test.go b/internal/xray/process_stats_baseline_test.go
+new file mode 100644
+index 00000000..bab9b07a
+--- /dev/null
++++ b/internal/xray/process_stats_baseline_test.go
+@@ -0,0 +1,23 @@
++package xray
++
++import "testing"
++
++// TestStatsBaselineBelongsToProcess: a restarted core is a new process with an
++// empty baseline, while the old process keeps its own.
++func TestStatsBaselineBelongsToProcess(t *testing.T) {
++	old := NewProcess(&Config{})
++	baseline := old.StatsBaseline()
++	if baseline == nil || len(baseline) != 0 {
++		t.Fatalf("new process baseline = %v, want empty non-nil map", baseline)
++	}
++	baseline["user>>>alice>>>traffic>>>downlink"] = 8388608
++	old.SetStatsBaseline(baseline)
++
++	restarted := NewProcess(&Config{})
++	if got := restarted.StatsBaseline(); len(got) != 0 {
++		t.Fatalf("restarted process inherited baseline %v", got)
++	}
++	if got := old.StatsBaseline()["user>>>alice>>>traffic>>>downlink"]; got != 8388608 {
++		t.Fatalf("old process baseline = %d, want 8388608", got)
++	}
++}

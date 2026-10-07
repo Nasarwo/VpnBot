@@ -1,0 +1,14 @@
+{
+  "pilot_public_id": "BA70F510",
+  "manual_happ_result": "user reported all works",
+  "panel_used_bytes": 15545024,
+  "panel_total_bytes": 10737418240,
+  "panel_enabled": true,
+  "free_bytes": 10721873216,
+  "paid_bytes": 0,
+  "usage_checkpoint_bytes": 15545024,
+  "desired_version": 2,
+  "applied_version": 2,
+  "mass_service_enabled": false,
+  "balance_matches_usage": true
+}

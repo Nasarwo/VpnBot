@@ -1,0 +1,22 @@
+# Build context: official 3x-ui v3.9.0 source after applying
+# docs/acceptance/3x-ui-v3.9.0-d3-stats-baseline.patch.
+# Keeps the original Xray binary and runtime assets from the pinned AMD64 image.
+FROM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS frontend
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+COPY internal/web/translation /src/internal/web/translation
+RUN npm run build
+
+FROM golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
+WORKDIR /src
+RUN apk add --no-cache build-base
+COPY . .
+COPY --from=frontend /src/internal/web/dist ./internal/web/dist
+ENV CGO_ENABLED=1 CGO_CFLAGS="-D_LARGEFILE64_SOURCE"
+RUN go build -ldflags "-w -s" -o /patched-x-ui main.go
+
+FROM ghcr.io/mhsanaei/3x-ui@sha256:93a7a68e3d0a65be1b02d2bfc1f3ca02d0e800516a403e103cea2d7c7090855d
+COPY --from=builder /patched-x-ui /app/x-ui
+LABEL org.opencontainers.image.revision="3cd4bf504c3cd8ea9b1c1fdb032a9796c5c43ddb+d3-baseline"

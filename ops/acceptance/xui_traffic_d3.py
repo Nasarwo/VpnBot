@@ -760,6 +760,10 @@ async def main() -> int:
     parser.add_argument("state", type=Path)
     parser.add_argument("--image", default=DEFAULT_IMAGE)
     parser.add_argument("--client-image", default=DEFAULT_IMAGE)
+    parser.add_argument(
+        "--prefix", default="d3acc", help="Docker names/network for this isolated run"
+    )
+    parser.add_argument("--port", type=int, default=52153, help="Local panel API port")
     parser.add_argument("--only", default=",".join(SCENARIOS))
     parser.add_argument("--report", type=Path)
     parser.add_argument("--keep", action="store_true")
@@ -767,7 +771,7 @@ async def main() -> int:
     XRAY = xray_binary(args.image)
     if xray_binary(args.client_image) != XRAY:
         raise RuntimeError("Panel and client image architectures must match")
-    lab = Lab(args.state, args.image, args.client_image)
+    lab = Lab(args.state, args.image, args.client_image, prefix=args.prefix, port=args.port)
     started = time.monotonic()
     lab.up()
     version = sh("docker", "run", "--rm", "--entrypoint", "/app/x-ui", args.image, "-v").strip()

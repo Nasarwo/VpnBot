@@ -65,7 +65,9 @@ class XuiClient:
         self._base_url = base_url.rstrip("/")
         self._username = username
         self._password = password
-        self._api_token = api_token
+        # The admin form stores encrypted credentials in the password field;
+        # this explicit username selects token authentication without a schema change.
+        self._api_token = api_token or (password if username == "@api-token" else None)
         self._csrf_token: str | None = None
         # None — ещё не проверяли; True/False — поддержка нового /panel/api/clients.
         self._clients_api: bool | None = None
@@ -279,6 +281,16 @@ class XuiClient:
             await self.login()
 
     # --- Inbounds -----------------------------------------------------------
+
+    async def list_inbound_hosts(self, inbound_id: int) -> list[dict[str, Any]]:
+        """Read 3x-ui external endpoints for a reverse-proxied inbound."""
+        response = await self._api("GET", f"/panel/api/hosts/byInbound/{inbound_id}")
+        data = self._parse_json(response)
+        hosts = data.get("obj")
+        if (not data.get("success") or not isinstance(hosts, list)
+                or not all(isinstance(host, dict) for host in hosts)):
+            raise XuiError("Панель не вернула внешние Hosts для XHTTP")
+        return hosts
 
     async def list_inbounds(self) -> list[dict[str, Any]]:
         """Возвращает список inbound'ов панели с их БД-id, портами и протоколами."""

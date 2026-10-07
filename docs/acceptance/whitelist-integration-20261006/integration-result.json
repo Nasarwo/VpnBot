@@ -1,0 +1,8 @@
+{
+  "pilot_public_id": "BA70F510",
+  "nodes": 7,
+  "whitelist_nodes": 1,
+  "Happ_JSON": true,
+  "whitelist_excluded_from_auto": true,
+  "existing_subscription_hashes_preserved": 3
+}

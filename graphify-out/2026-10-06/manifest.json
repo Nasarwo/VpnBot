@@ -372,9 +372,9 @@
     "semantic_hash": ""
   },
   "app/services/provisioning.py": {
-    "mtime": 1791239775.2553873,
-    "seen": 1791242403.939559,
-    "ast_hash": "35a7983c37d15eda4dfc279593985c21",
+    "mtime": 1791315574.8604782,
+    "seen": 1791315999.6969402,
+    "ast_hash": "080406c6eb0c90baafd563f57a4a2fae",
     "semantic_hash": ""
   },
   "app/services/subhub_client.py": {
@@ -414,9 +414,9 @@
     "semantic_hash": ""
   },
   "app/services/xui_client.py": {
-    "mtime": 1791254651.6668198,
-    "seen": 1791256746.3857162,
-    "ast_hash": "6cf1a31d25c6d1c12586060562cede97",
+    "mtime": 1791315817.0029287,
+    "seen": 1791315999.6969478,
+    "ast_hash": "50841186e7dc6d4b719d4ad791c6f3ed",
     "semantic_hash": ""
   },
   "app/services/xui_payloads.py": {
@@ -630,9 +630,9 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1791256082.3308184,
-    "seen": 1791256746.385772,
-    "ast_hash": "14dbbe085a486d6b14ef323cdf375fc0",
+    "mtime": 1791316633.8245249,
+    "seen": 1791317672.6600683,
+    "ast_hash": "d826136cdbdf663a3147a09c1ca59d31",
     "semantic_hash": ""
   },
   "VPNSite/README.md": {
@@ -822,21 +822,21 @@
     "semantic_hash": ""
   },
   "ops/acceptance/stack.sh": {
-    "mtime": 1791239775.4133885,
-    "seen": 1791242403.9395697,
-    "ast_hash": "aa58d5791f0aa60582a8825b2b7bf44f",
+    "mtime": 1791258429.1341972,
+    "seen": 1791258629.1902895,
+    "ast_hash": "74dbbf49b0057f1fc84074fde3929ec8",
     "semantic_hash": ""
   },
   "ops/acceptance/whitelist_e2e.py": {
-    "mtime": 1791256144.6593356,
-    "seen": 1791256746.3857217,
-    "ast_hash": "88deda4daa6e32b3633c64336592ac0e",
+    "mtime": 1791258407.7329807,
+    "seen": 1791258629.1903005,
+    "ast_hash": "52ca73173edd6ee1db91a58c098b3fa1",
     "semantic_hash": ""
   },
   "ops/acceptance/whitelist_migration_check.py": {
-    "mtime": 1791239775.4153886,
-    "seen": 1791242403.9395733,
-    "ast_hash": "17ce6aa67fd8816a01908fa2a3399147",
+    "mtime": 1791288530.0357077,
+    "seen": 1791288832.4197395,
+    "ast_hash": "f496e8c100578acf7989e5a514755f33",
     "semantic_hash": ""
   },
   "tests/test_whitelist_acceptance.py": {
@@ -906,9 +906,9 @@
     "semantic_hash": ""
   },
   "docs/WHITELIST_ACCEPTANCE.md": {
-    "mtime": 1791256689.1539767,
-    "seen": 1791256746.3857806,
-    "ast_hash": "59dbf3a546afe8bb9832f6db0b7e1287",
+    "mtime": 1791317662.4422483,
+    "seen": 1791317672.6600792,
+    "ast_hash": "32508640f26ad6e1f91c33c2cc917f3f",
     "semantic_hash": ""
   },
   "tests/test_payment_kind_conflict.py": {
@@ -942,9 +942,9 @@
     "semantic_hash": ""
   },
   "app/services/whitelist_compat.py": {
-    "mtime": 1791239775.2573872,
-    "seen": 1791242403.9395657,
-    "ast_hash": "60894a6aa272c691d966eaa9def8ef39",
+    "mtime": 1791315217.7952795,
+    "seen": 1791315999.6969469,
+    "ast_hash": "73770267080df61e7128023a1e653536",
     "semantic_hash": ""
   },
   "tests/test_whitelist_inbound_compat.py": {
@@ -960,9 +960,9 @@
     "semantic_hash": ""
   },
   "ops/acceptance/subhub_quota_e2e.py": {
-    "mtime": 1791256144.6613357,
-    "seen": 1791256746.38572,
-    "ast_hash": "78f20b76f39ad849ddf290ee101a208c",
+    "mtime": 1791258209.148948,
+    "seen": 1791258629.1902943,
+    "ast_hash": "6625cb2ea2982bb3c557cb5581dd5f30",
     "semantic_hash": ""
   },
   "docs/acceptance/subhub_quota_2026-10-05.md": {
@@ -996,9 +996,9 @@
     "semantic_hash": ""
   },
   "ops/acceptance/xui_traffic_d3.py": {
-    "mtime": 1791239775.4163885,
-    "seen": 1791242403.9395742,
-    "ast_hash": "c222f49e3965e566053db2cc2c9a7868",
+    "mtime": 1791290267.2553053,
+    "seen": 1791290673.1604533,
+    "ast_hash": "f4a4bd68f434c3ac3837a182baee7df0",
     "semantic_hash": ""
   },
   "tests/test_whitelist_epoch.py": {
@@ -1047,6 +1047,180 @@
     "mtime": 1791255889.1982458,
     "seen": 1791256746.3857589,
     "ast_hash": "a1e956dd242ee93a0cf055ef83c746d9",
+    "semantic_hash": ""
+  },
+  "ops/acceptance/whitelist_retarget_e2e.py": {
+    "mtime": 1791258944.8983119,
+    "seen": 1791288832.4197404,
+    "ast_hash": "bad5e7e93fdaf35b57b21130de26e114",
+    "semantic_hash": ""
+  },
+  "docs/DEPLOYMENT_2026-10-06.md": {
+    "mtime": 1791258048.6762629,
+    "seen": 1791258629.1904771,
+    "ast_hash": "9f7961e6a7ecba8014b0354de0121039",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/repeat-20261006/d3.json": {
+    "mtime": 1791288794.435802,
+    "seen": 1791288832.419734,
+    "ast_hash": "e43584f9c764bd81ce410b1bf56e7452",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/whitelist_repeat_2026-10-06.md": {
+    "mtime": 1791290764.2716832,
+    "seen": 1791291271.6865664,
+    "ast_hash": "83702b055a283b4162ab78b3f99ba1ac",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/d3-fixed-20261006/d3.json": {
+    "mtime": 1791290402.1202476,
+    "seen": 1791290673.1604402,
+    "ast_hash": "503f132341487c80a1bbe1eb8307d3b8",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/d3-fixed-20261006/quota-final.json": {
+    "mtime": 1791290425.408188,
+    "seen": 1791290673.1604416,
+    "ast_hash": "60d4fcc32c9dc26e55ba917dfa12596c",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/d3-fixed-20261006/retarget-final.json": {
+    "mtime": 1791290607.020178,
+    "seen": 1791290673.1604426,
+    "ast_hash": "3727b720775dfb445fc4e2176fa03b4c",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/d3-fixed-20261006/whitelist-final.json": {
+    "mtime": 1791290422.3771951,
+    "seen": 1791290673.160443,
+    "ast_hash": "5683ab39d185b15d115148153db9c564",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/d3-fixed-20261006/whitelist-repeat.json": {
+    "mtime": 1791290161.9979353,
+    "seen": 1791290673.160444,
+    "ast_hash": "f79e6b53c6c9bdf4848771594b9368c1",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/d3-fixed-20261006/whitelist.json": {
+    "mtime": 1791289819.1358361,
+    "seen": 1791290673.1604445,
+    "ast_hash": "790012da4f69dafafb40e3262eb87f0b",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/repeat-20261006/background.json": {
+    "mtime": 1791289092.4263375,
+    "seen": 1791290673.1604452,
+    "ast_hash": "801f222d7535d3877990aba50766d972",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/repeat-20261006/quota.json": {
+    "mtime": 1791288867.0717802,
+    "seen": 1791290673.160447,
+    "ast_hash": "631dc362db85113c52c7a533a91a264d",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/happ_android_4.6.0.md": {
+    "mtime": 1791291626.5086467,
+    "seen": 1791292691.4941173,
+    "ast_hash": "ba7b67322c4b3230cb78d107349384dd",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/xui_d3_fixed_2026-10-06.md": {
+    "mtime": 1791292687.4569776,
+    "seen": 1791292691.494123,
+    "ast_hash": "48bef1365bbe7273757b3f3f6272ffd2",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/d3-fixed-20261006/d3-final.json": {
+    "mtime": 1791290987.161967,
+    "seen": 1791291271.6864793,
+    "ast_hash": "41cbc97cc6138212bb84ad09640d5a3e",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/d3-fixed-20261006/lan-preflight.json": {
+    "mtime": 1791291233.710906,
+    "seen": 1791291271.6864827,
+    "ast_hash": "87365b71abc1183c02ec2d587ed89191",
+    "semantic_hash": ""
+  },
+  "ops/acceptance/happ_wifi_prepare.py": {
+    "mtime": 1791291111.4278908,
+    "seen": 1791291271.6864924,
+    "ast_hash": "0b72251191ca7dddcdfc7059b22b6106",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/d3-fixed-20261006/happ-accounting.json": {
+    "mtime": 1791291578.3241591,
+    "seen": 1791292691.4940383,
+    "ast_hash": "d79a6da181347fcbbfe557b20d101a54",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/xui_final_flush_2026-10-06.md": {
+    "mtime": 1791314494.1237197,
+    "seen": 1791314502.2241063,
+    "ast_hash": "573c10410bd63a00f79e3d7fbc3206f7",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/whitelist-prod-20261006/core-restart-result.json": {
+    "mtime": 1791314436.4347262,
+    "seen": 1791314502.2239683,
+    "ast_hash": "4f46e2f02754d26dec8354d2c3dc3fea",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/whitelist-prod-20261006/remote-check.py": {
+    "mtime": 1791314589.1473322,
+    "seen": 1791314635.6014993,
+    "ast_hash": "15b2402931a228cddac36c2d917c972b",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/whitelist_prod_2026-10-06.md": {
+    "mtime": 1791314858.6657841,
+    "seen": 1791314862.1915917,
+    "ast_hash": "edac46ba46555df8a76cde0c25b82337",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/whitelist-prod-20261006/interrupted-reuse-result.json": {
+    "mtime": 1791314562.6038845,
+    "seen": 1791314635.6014974,
+    "ast_hash": "c8691b203364d10d5508adc93b905cea",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/whitelist-prod-20261006/control-group-failure-result.json": {
+    "mtime": 1791314719.511505,
+    "seen": 1791314862.1915123,
+    "ast_hash": "e8b01dc735fbe6fadc16d5114e9a4f24",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/whitelist-prod-20261006/final-result.json": {
+    "mtime": 1791314828.7812977,
+    "seen": 1791314862.1915154,
+    "ast_hash": "efc9cd9ffb7e5fa392419c78149489f9",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/whitelist-integration-20261006/integration-result.json": {
+    "mtime": 1791316564.8266702,
+    "seen": 1791317672.6599984,
+    "ast_hash": "d3e8d263b074fdf780c7c04f73ee711a",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/whitelist-integration-20261006/manual-usage-result.json": {
+    "mtime": 1791317142.080762,
+    "seen": 1791317672.6600003,
+    "ast_hash": "f28d6ac8e910662790cabf25543d20d3",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/whitelist_integration_2026-10-06.md": {
+    "mtime": 1791317142.0567625,
+    "seen": 1791317672.6600842,
+    "ast_hash": "5ca1e99ab31fe33a104b89b2d7356860",
+    "semantic_hash": ""
+  },
+  "docs/acceptance/whitelist_rollout_2026-10-06.md": {
+    "mtime": 1791317662.4162483,
+    "seen": 1791317672.660088,
+    "ast_hash": "cb0aaa5e5048aed1802ed160b712aafa",
     "semantic_hash": ""
   }
 }

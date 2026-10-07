@@ -17,6 +17,7 @@ from app.logging_config import setup_logging
 from app.services import antishare, billing, expiry, health, whitelist
 from app.services.ip_provider import build_ip_provider
 from app.services.subhub_client import trigger_configured_sync
+from app.services.whitelist_labels import publish_confirmed_snapshots
 from app.services.web_bridge import delivery_loop, start_bridge
 from app.services.xui_updater import build_updater
 
@@ -118,6 +119,7 @@ async def _whitelist_queue_worker(settings: Settings) -> None:
         try:
             async with sessionmaker() as session:
                 applied = await whitelist.process_due(session, updater)
+            await publish_confirmed_snapshots(settings)
             if applied:
                 await _subhub_sync(settings, "очередь «Обход белых списков»")
         except Exception:  # noqa: BLE001 - фоновая задача не должна падать
@@ -149,6 +151,7 @@ async def _whitelist_reconcile_poller(settings: Settings) -> None:
                     status=whitelist.RECONCILE_STATUS,
                 )
             complete = report.complete
+            await publish_confirmed_snapshots(settings)
         except Exception as exc:  # noqa: BLE001 - фоновая задача не должна падать
             whitelist.RECONCILE_STATUS.last_run_note = f"ошибка: {type(exc).__name__}"
             logger.exception("Ошибка фоновой сверки расхода «Обход белых списков»")

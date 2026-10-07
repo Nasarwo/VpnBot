@@ -615,7 +615,7 @@ async def _attach_and_notify(
         caption=caption,
     )
     await message.answer(
-        texts.proof_received(payment.payment_code), parse_mode="HTML"
+        texts.proof_received(payment.payment_code, payment.kind), parse_mode="HTML"
     )
     await state.clear()
 

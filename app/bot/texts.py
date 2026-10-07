@@ -36,6 +36,8 @@ BTN_PROXY_MTPROTO = "MTProto 1"
 BTN_PROXY_MTPROTO_2 = "MTProto 2"
 BTN_NEWS = "Новостной канал"
 BTN_WHITELIST = "Обход белых списков"
+BTN_WHITELIST_TRAFFIC = "Трафик в белых списках"
+WHITELIST_CONFIG_NAME = "Белые списки"
 BTN_WHITELIST_REFRESH = "Обновить остаток"
 
 INSTALL_GUIDE_WINDOWS_URL = (
@@ -397,10 +399,11 @@ def payment_created(
     )
 
 
-def proof_received(payment_code: str) -> str:
+def proof_received(payment_code: str, kind: str | None = None) -> str:
+    action = "начислит трафик" if kind == PAYMENT_KIND_TRAFFIC else "продлит доступ"
     return (
         f"Подтверждение по заявке <code>{escape(payment_code)}</code> получено.\n"
-        "Администратор проверит оплату и продлит доступ. Мы пришлём уведомление."
+        f"Администратор проверит оплату и {action}. Мы пришлём уведомление."
     )
 
 
@@ -1000,7 +1003,7 @@ _WL_STATUS = {
 def whitelist_overview(ov, paid_free_bytes: int) -> str:
     """Раздел услуги для пользователя. parse_mode='HTML'."""
     lines = [
-        f"{emoji.tg('connect')} <b>{BTN_WHITELIST}</b>",
+        f"{emoji.tg('connect')} <b>{BTN_WHITELIST_TRAFFIC}</b>",
         "",
         f"Статус: {_WL_STATUS.get(ov.status, ov.status)}",
     ]
@@ -1070,7 +1073,7 @@ def whitelist_overview(ov, paid_free_bytes: int) -> str:
     if ov.status in ("active", "lifetime", "exhausted"):
         lines.extend([
             "",
-            f"Конфиг «{BTN_WHITELIST}» входит в вашу обычную ссылку подписки "
+            f"Конфиг «{WHITELIST_CONFIG_NAME}» входит в вашу обычную ссылку подписки "
             "(«Подключение»). Отдельная ссылка не нужна.",
         ])
     if ov.can_buy and ov.packages:
@@ -1108,7 +1111,7 @@ def traffic_credited_expired(size_bytes: int | None) -> str:
 
 def whitelist_pending_note() -> str:
     return (
-        f"\n\nКонфиг «{BTN_WHITELIST}» обновится на сервере в течение нескольких "
+        f"\n\nКонфиг «{WHITELIST_CONFIG_NAME}» обновится на сервере в течение нескольких "
         "минут."
     )
 

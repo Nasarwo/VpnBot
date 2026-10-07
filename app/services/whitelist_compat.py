@@ -168,11 +168,25 @@ def check_inbound(raw: dict[str, Any], *, flow: str | None = None) -> InboundCom
     if protocol == "vless":
         kind = f"vless/{security}/{network}"
         if security != "reality":
+            if network == "xhttp" and security in ("none", "tls"):
+                groups = raw.get("subscriptionHosts") or []
+                active = [g for g in groups if isinstance(g, dict)
+                          and not g.get("isDisabled") and not g.get("isHidden")]
+                usable = len(active) == 1 and len(active[0].get("hosts") or []) == 1
+                host = active[0] if usable else {}
+                if (usable and host.get("security") == "tls" and host.get("sni")
+                        and isinstance(host.get("port"), int) and 0 < host["port"] < 65536
+                        and not host.get("allowInsecure") and not flow
+                        and str(settings.get("decryption") or "none") == "none"):
+                    return InboundCompat(inbound_id, kind, notes=(
+                        "Внешний TLS endpoint задан в Hosts панели. В SubHub нужен "
+                        "use_panel_links=true (один inbound и одна внешняя ссылка).",
+                    ))
             return InboundCompat(
                 inbound_id, kind,
                 problems=(
                     f"VLESS без REALITY (security={security}): SubHub строит ссылки "
-                    "VLESS только с REALITY",
+                    "VLESS с REALITY либо XHTTP с единственным внешним TLS Host",
                 ),
             )
         problems, notes = _check_vless_reality(stream, settings, network, flow)
